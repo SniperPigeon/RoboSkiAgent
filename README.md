@@ -1,47 +1,47 @@
 # RoboSkiAgent
 
-基于LangGraph的Agent驱动机器人通用Skill Library。通过智能代理编排和执行机器人技能，提供灵活的任务规划和执行能力。
+LangGraph-based agent-driven universal robot Skill Library. Provides flexible task planning and execution capabilities through intelligent agent orchestration of robot skills.
 
 ## Setup
 
-### 前置要求
+### Prerequisites
 - Python >= 3.10
-- [LangSmith API Key](https://smith.langchain.com/settings) (免费注册)
+- [LangSmith API Key](https://smith.langchain.com/settings) (free to sign up)
 
-### 安装步骤
+### Installation Steps
 
-1. **安装LangGraph CLI**
+1. **Install LangGraph CLI**
    ```bash
    pip install -U "langgraph-cli[inmem]"
    ```
 
-2. **从模板创建应用** (可选)
+2. **Create app from template** (optional)
    ```bash
    langgraph new path/to/your/app --template new-langgraph-project-python
    ```
 
-3. **安装依赖**
+3. **Install dependencies**
    ```bash
    pip install -e .
    ```
 
-4. **配置环境变量**
+4. **Configure environment variables**
    
-   创建 `.env` 文件并添加：
+   Create a `.env` file and add:
    ```
    LANGSMITH_API_KEY=lsv2_...
    ```
 
-5. **启动开发服务器**
+5. **Launch development server**
    ```bash
    langgraph dev
    ```
    
-   访问 Studio UI: `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`
+   Access Studio UI: `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`
 
-## 测试
+## Testing
 
-使用Python SDK测试：
+Test using Python SDK:
 ```python
 from langgraph_sdk import get_client
 import asyncio
@@ -52,7 +52,7 @@ async def main():
     async for chunk in client.runs.stream(
         None,
         "agent",
-        input={"messages": [{"role": "human", "content": "执行任务"}]},
+        input={"messages": [{"role": "human", "content": "Execute task"}]},
     ):
         print(f"Event: {chunk.event}")
         print(chunk.data)
