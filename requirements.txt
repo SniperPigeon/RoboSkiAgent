@@ -1,0 +1,18 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+python>=3.10
+torch 
+torchvision
+GPUtil
+langchain 
+langchain-huggingface 
+transformers 
+accelerate 
+bitsandbytes
+langchain[huggingface]
+huggingface_hub[hf_xet]
+python-dotenv
+langchain-ollama
+ollama
+langgraph
+langgraph-cli[inmem]
+langgraph-sdk
