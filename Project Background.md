@@ -26,7 +26,7 @@
 |------|------|------|
 | Agent 编排 | **LangGraph** (`StateGraph`) | 多 Agent 状态机、条件路由、HILP 节点挂起 |
 | LLM 基础设施 | **LangChain Core** | Tool 抽象、消息结构、`RemoveMessage` |
-| 大模型 | **本地 LLM**（如 ChatOllama / Llama-3.1） | 车间局域网部署，数据隐私 + 低延迟 |
+| 大模型 |**Claude** 强能力验证模型 + **本地 LLM**（如 ChatOllama / Llama-3.1） | 车间局域网部署，数据隐私 + 低延迟 |
 | 机器人仿真 | **RoboDK** | 运动学求解、碰撞检测、真机前仿真验证 |
 | 工艺知识库 | **YAML 规范文件** | 装配工艺、工具清单、人机任务边界定义 |
 

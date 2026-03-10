@@ -14,7 +14,16 @@
 
 ----
 交流时输出中文，代码注释一律用英文
+
+----
+
+## 开发和规范原则
+
 ---
+- 当发现原文档的设计有问题时或与你探讨出有问题时，应在许可后将发现更新至文档并修改原来的表述，但是不要直接替换以保留迭代过程。
+- 在规划时思考隐藏的逻辑问题，包括但不限于造成逻辑死锁的设计、兜底过多导致过度静默处理错误都应避免。
+---
+
 
 ## 技术栈
 
@@ -22,7 +31,7 @@
 |------|------|
 | Agent 编排 | LangGraph (`StateGraph`) |
 | LLM 基础设施 | LangChain Core |
-| 大模型 | 本地 LLM，ChatOllama / Llama-3.1 |
+| 大模型 | **Claude** 强能力验证模型 + **本地 LLM**（如 ChatOllama / Llama-3.1） |
 | 机器人仿真 | RoboDK |
 | 工艺知识库 | YAML 规范文件 |
 | 语言 | Python 3.11+ |
@@ -80,17 +89,21 @@ RoboSkiAgent/
 ### Layer 2 · 执行与清理层
 
 **Dispatcher**（纯代码，非 LLM）
-- `todo_list.pop(0)` 提取 `current_task` 写入 Global State
+- ~~`todo_list.pop(0)` 提取 `current_task` 写入 Global State~~ ← 已废弃：无条件 pop 导致任务在 halt/失败时永久丢失
+- ~~`todo_list[0]` peek~~ ← 已废弃：peek 需要 `last_result` 作为隐式路由信号，语义耦合不清晰
+- ✅ **填充空槽**：仅当 `current_task == {}` 时才 `pop(0)` 填入；槽已有任务时跳过不覆盖
 - ❌ 禁止引入任何 LLM 推理，任务流转必须 100% 确定性
 
 **Executor**
 - 只关注当前 `current_task`，动态加载 P/R/E-skills 完成单步物理动作
+- ✅ 执行结果写入 `last_result`（数据用途），Context Flush 据此决定成功/失败路径
 - ❌ 禁止解析 YAML 规范
 - ❌ 禁止思考业务逻辑（"为什么要抓这个零件"）
 
 **Context Flush**（纯代码）
+- ✅ **成功时**：清空 `current_task = {}`（腾出槽位），清空 `last_result = None`
+- ✅ **失败时**：设置 `halt_flag = True`；`current_task` 与 `todo_list` 保持不变，resume 后直接重试同一任务
 - 用 `RemoveMessage` 抹除 Executor 产生的 `ToolMessage` 噪音
-- ✅ 只删底层噪音
 - ❌ 绝不删除上层下发的 `current_task` 相关消息
 
 ---
@@ -99,13 +112,20 @@ RoboSkiAgent/
 
 ```python
 class GlobalState(TypedDict):
-    todo_list: list[dict]        # Planner 生成的任务队列
-    current_task: dict           # Dispatcher 当前下发的单步任务
+    todo_list: list[dict]        # Planner 生成的任务队列；Dispatcher 成功后消费头部
+    current_task: dict           # 执行槽：{} = 空闲，{...} = 执行中或失败保留
     robot_state: RobotState      # 当前机器人位姿、关节角、夹爪状态
     halt_flag: bool              # True = 系统已挂起，等待人工介入
+    last_result: Optional[dict]  # Executor 写入的结果数据（非路由信号）
     execution_log: list[str]     # 极简状态上报，由 Context Flush 写入
     messages: list[BaseMessage]  # LangGraph 消息列表
 ```
+
+**`current_task` 作为执行槽的状态语义（单一真相来源）：**
+- `{}` → 槽空闲，Dispatcher 负责填入下一个任务
+- `{...}` → 任务在执行中，或失败后保留等待 resume 重试；Dispatcher 看到非空槽不会覆盖
+
+**路由信号来源**：`halt_flag`（而非 `last_result`）— Context Flush 失败时设置 `halt_flag=True`，`should_continue` 只需检查 `halt_flag` 和 `todo_list`，无隐式字段耦合。
 
 ---
 
