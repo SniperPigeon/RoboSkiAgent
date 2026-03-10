@@ -8,6 +8,7 @@ transformers
 accelerate 
 bitsandbytes
 langchain[huggingface]
+langchain-anthropic
 huggingface_hub[hf_xet]
 python-dotenv
 langchain-ollama
