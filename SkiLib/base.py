@@ -1,7 +1,8 @@
+import functools
 from abc import abstractmethod, ABC
 from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import List, Dict, Any, Literal, Optional
+from typing import Callable, List, Dict, Any, Literal, Optional
 from robodk import robolink, robomath
 
 
@@ -314,3 +315,66 @@ class BaseSkill(ABC):
     def try_execute(self, *args, **kwargs) -> SkillResult:
         """Run check(), then execute() if the check passed. Returns a single SkillResult."""
         pass
+
+
+# ================ @require_robot_active decorator ================
+
+def require_robot_active(_func: Optional[Callable] = None, *, bypass_halt: bool = False):
+    """
+    Guard decorator for Primitive/Skill execute() methods.
+
+    Checks RobotContext.halt_flag at the entry of each decorated call.
+    When halt_flag is True the call is short-circuited and a SkillResult
+    with error_type=ERROR_ROBOT_INACTIVE is returned immediately, without
+    touching the robot hardware.
+
+    Usage:
+        # Standard – block when halted
+        @require_robot_active
+        def execute(self, ...) -> SkillResult: ...
+
+        # Whitelist – must bypass halt to avoid permanent deadlock
+        @require_robot_active(bypass_halt=True)
+        def resume(self) -> SkillResult: ...
+
+    Whitelist (bypass_halt=True required):
+        - resume()
+        - request_human_intervention()
+
+    Notes:
+        - The decorator uses a lazy import of RobotContext to avoid circular
+          imports between base.py and robotcontext.py.
+        - If RobotContext has not been initialised yet (e.g. unit tests without
+          a RoboDK connection), the check is skipped and the wrapped function
+          runs normally.
+        - halt_flag is read from RobotContext; the Executor node is responsible
+          for synchronising GlobalState["halt_flag"] → RobotContext.halt_flag
+          before invoking any skill.
+    """
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs) -> SkillResult:
+            if not bypass_halt:
+                # Lazy import avoids circular dependency: base ← robotcontext ← base
+                from SkiLib.robotcontext import RobotContext  # noqa: PLC0415
+                ctx = RobotContext.instance()
+                if ctx is not None and ctx.halt_flag:
+                    return SkillResult(
+                        success=False,
+                        execution_phase=ExecutionPhase.EXECUTION,
+                        error_type=ERROR_ROBOT_INACTIVE,
+                        message=(
+                            "Robot is inactive: halt_flag is set. "
+                            "No commands will be dispatched until the halt is cleared."
+                        ),
+                        suggestion="Call resume() or request_human_intervention() to clear the halt.",
+                    )
+            return func(*args, **kwargs)
+        return wrapper
+
+    # Support both @require_robot_active and @require_robot_active(bypass_halt=True)
+    if _func is not None:
+        # Called without parentheses: @require_robot_active
+        return decorator(_func)
+    # Called with parentheses: @require_robot_active(...)
+    return decorator
