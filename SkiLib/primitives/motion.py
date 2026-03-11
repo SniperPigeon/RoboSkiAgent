@@ -1,7 +1,7 @@
 from SkiLib.base import (
     BasePrimitive, SkillResult, ExecutionPhase, RobotState,
     ERROR_INVALID_PARAM, ERROR_MISSING_REF_FRAME,
-    ERROR_IK_FAILURE, ERROR_COLLISION, ERROR_TIMEOUT,
+    ERROR_IK_FAILURE, ERROR_COLLISION, ERROR_TIMEOUT, require_robot_active,
 )
 from robodk import robolink
 from robodk import robomath
@@ -80,7 +80,7 @@ class MoveJ(BasePrimitive):
                 "Check the collision map to identify all collision pairs and adjust the path or robot configuration."
             ),
         )
-
+    @require_robot_active
     def execute(self, target: Union[Item, List[float], robomath.Mat], blocking: bool = True, ref_frame: Optional[robomath.Mat] = None) -> SkillResult:
         try:
             if isinstance(target, robomath.Mat):
@@ -123,14 +123,14 @@ class MoveJ(BasePrimitive):
         check = self.check(target, ref_frame)
         if not check.success:
             return check
-        return self.execute(target, blocking, ref_frame)
+        return self.execute(target, blocking, ref_frame) #type: ignore
 
 
 class MoveL(BasePrimitive):
     def __init__(self, robot_object, RDK_object):
         self.robot: robolink.Item     = robot_object
         self.RDK:   robolink.Robolink = RDK_object
-
+        
     def check(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None) -> SkillResult:
         # TODO: implement MoveL_Test pre-flight check (known pending item per CLAUDE.md)
         return SkillResult(
@@ -138,7 +138,7 @@ class MoveL(BasePrimitive):
             execution_phase=ExecutionPhase.PLANNING,
             message="MoveL pre-flight check not yet implemented; skipping.",
         )
-
+    @require_robot_active(bypass_halt=False)
     def execute(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None, blocking: bool = True) -> SkillResult:
         try:
             if isinstance(target, robomath.Mat):
@@ -181,4 +181,4 @@ class MoveL(BasePrimitive):
         check = self.check(target, ref_frame)
         if not check.success:
             return check
-        return self.execute(target, ref_frame, blocking)
+        return self.execute(target, ref_frame, blocking) #type: ignore
