@@ -1,6 +1,6 @@
 from robodk import robolink    # RoboDK API
 from robodk import robomath    # Robot toolbox
-from typing import Dict, Type, TYPE_CHECKING
+from typing import Dict, Optional, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from SkiLib.base import BasePrimitive
@@ -27,25 +27,36 @@ class RobotContext:
         registry = context.primitive_registry
     """
     _instance = None
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
         return cls._instance
-    
+
+    @classmethod
+    def instance(cls) -> Optional['RobotContext']:
+        """Return the existing singleton if initialized, else None (no side effects)."""
+        inst = cls._instance
+        if inst is not None and getattr(inst, '_initialized', False):
+            return inst
+        return None
+
     def __init__(self):
         # Prevent re-initialization
         if self._initialized:
             return
-            
+
         self.RDK = robolink.Robolink()
         robot = self.RDK.Item('', ITEM_TYPE_ROBOT)
         if robot is None or not robot.Valid():
             raise Exception("No robot found in the RoboDK station")
         self.robot = robot
         self.robot_name = robot.Name()
-        
+
+        # Safety flag: set True by Context Flush on failure; cleared on resume
+        self.halt_flag: bool = False
+
         # Auto-initialize primitive registry
         self.primitive_registry = PrimitiveRegistry(self.robot, self.RDK)
         self._initialized = True
