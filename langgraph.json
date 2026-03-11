@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "robot_assembly": "./SkiLib/graph.py:create_graph"
+  },
+  "env": ".env"
+}
