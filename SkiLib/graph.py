@@ -27,28 +27,32 @@ from langgraph.graph import StateGraph, START, END
 class GlobalState(TypedDict):
     """
     Shared state across all agents in the LangGraph workflow.
-    
+
     Aligned with CLAUDE.md specification.
     Production version should import RobotState from SkiLib.base.
     """
     # Layer-1: planning outputs
-    todo_list: list[dict]           # Planner generates [{task_id, skill, params}, ...]
-    
+    todo_list: list[dict]           # Planner generates [{task_id, type, skill, params}, ...]
+
     # Layer-2: execution context
     current_task: dict              # Execution slot: {} = idle, {...} = in-flight or failed
-    
+
     # Robot runtime snapshot (stub — production type: SkiLib.base.RobotState)
     robot_state: dict
-    
+
     # Control flags
     halt_flag: bool                 # True = all R-skill execution locked (HILP trigger)
-    
-    # Executor writes result here; Context Flush uses this to decide success/failure path
+    halt_reason: Optional[str]      # "TASK_FAILURE" | "MANUAL_TASK" | None — read by human_intervention
+
+    # Executor writes result here; Context Flush uses needs_hilp field to decide HILP path
     last_result: Optional[dict]
-    
+
+    # Internal routing: written by human_intervention, read by after_human_intervention only
+    _hi_action: Optional[str]
+
     # Audit trail written by Context Flush; Annotated list avoids key overwrite
     execution_log: Annotated[list[str], operator.add]
-    
+
     # LangGraph message bus
     messages: Annotated[list[BaseMessage], operator.add]
 
@@ -105,11 +109,14 @@ def planner(state: GlobalState) -> dict:
 def dispatcher(state: GlobalState) -> dict:
     """
     Dispatcher Node (Pure Code, No LLM)
-    
+
     Role: Fill the execution slot — pop todo_list[0] into current_task ONLY when slot is empty.
           If current_task is already set (e.g. retained after failure), do nothing.
     Rule: 100% deterministic; must never invoke any LLM.
-    
+
+    For manual tasks (type="manual") the slot is filled AND halt_flag/halt_reason are set
+    so that after_dispatcher routes them directly to human_intervention, bypassing Executor.
+
     State transitions for `current_task` slot:
     - {} → {...}  : Slot is empty, pop next task from todo_list
     - {...} → {...}: Slot occupied (task in-flight or retained after failure), skip
@@ -118,16 +125,24 @@ def dispatcher(state: GlobalState) -> dict:
         # Slot occupied — task in flight or retained after failure; do not overwrite
         print(f"[dispatcher] Slot occupied: {state['current_task'].get('task_id')} — skipping pop.")
         return {}
-    
+
     todo = list(state.get("todo_list", []))
     if not todo:
         print("[dispatcher] todo_list empty — nothing to dispatch.")
         return {}
-    
+
     task = todo.pop(0)
     print(f"[dispatcher] Dispatching: {task}")
-    
-    return {"current_task": task, "todo_list": todo}
+
+    result: dict = {"current_task": task, "todo_list": todo}
+
+    if task.get("type") == "manual":
+        # Manual task: pre-set HILP flags so after_dispatcher routes to human_intervention
+        result["halt_flag"]   = True
+        result["halt_reason"] = "MANUAL_TASK"
+        print(f"[dispatcher] Manual task detected — flagging HILP (MANUAL_TASK).")
+
+    return result
 
 
 def executor(state: GlobalState) -> dict:
@@ -285,7 +300,9 @@ if __name__ == "__main__":
         "current_task":  {},
         "robot_state":   {"joints": None, "pose": None, "gripper_state": "UNKNOWN"},
         "halt_flag":     False,
+        "halt_reason":   None,
         "last_result":   None,
+        "_hi_action":    None,
         "execution_log": [],
     }
     

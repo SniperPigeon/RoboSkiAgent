@@ -108,6 +108,13 @@ class SkillResult:
     error_type:      Optional[str]        = None
     suggestion:      Optional[str]        = None
     data:            Optional[dict]       = None
+    needs_hilp:      bool                 = True
+    # needs_hilp semantics:
+    #   True  (default) — Executor has given up; Context Flush should trigger HILP.
+    #   False           — Executor's internal ReAct loop is still recovering; this state
+    #                     must NOT be written to last_result when exiting the Executor node.
+    #                     If Context Flush ever sees success=False + needs_hilp=False it
+    #                     treats it conservatively as needs_hilp=True (safety net).
 
     def __post_init__(self):
         # Programming-time invariant: a failed result must carry error_type so the
@@ -138,6 +145,7 @@ class SkillResult:
             }
         if not self.success:
             payload["error_type"] = self.error_type
+            payload["needs_hilp"] = self.needs_hilp
             if self.suggestion:
                 payload["suggestion"] = self.suggestion
         if self.data:
