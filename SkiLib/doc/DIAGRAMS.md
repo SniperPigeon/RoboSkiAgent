@@ -6,35 +6,35 @@
 
 ```mermaid
 graph TB
-    subgraph INPUT["输入层"]
-        NL["自然语言指令<br/>e.g. '将 Part_A 装入 Tray_1'"]
+    subgraph INPUT["Input Layer"]
+        NL["Natural language instruction<br/>e.g. 'Assemble Part_A into Tray_1'"]
     end
 
-    subgraph LAYER1["Layer 1 · 规划层（LLM 驱动）"]
+    subgraph LAYER1["Layer 1 · Planning Layer (LLM-driven)"]
         direction LR
-        SUP["🧠 Supervisor<br/>────────────────<br/>ReAct 循环<br/>调用 Task-Skills 消歧义<br/>只处理符号/ID<br/>❌ 禁止计算坐标"]
-        PLAN["📋 Planner<br/>────────────────<br/>结构化输出<br/>生成 todo_list JSON<br/>校验 + Retry(×3)<br/>❌ 禁止模糊描述"]
-        SUP -->|"知识饱和 / HILP"| PLAN
+        SUP["🧠 Supervisor<br/>────────────────<br/>ReAct loop<br/>Use Task-Skills to resolve ambiguity<br/>Only handles symbols/IDs<br/>❌ Do not compute coordinates"]
+        PLAN["📋 Planner<br/>────────────────<br/>Structured output<br/>Generate todo_list JSON<br/>Validation + Retry (×3)<br/>❌ No vague descriptions"]
+        SUP -->|"Knowledge saturation / HILP"| PLAN
     end
 
-    subgraph LAYER2["Layer 2 · 执行层（确定性 + LLM）"]
+    subgraph LAYER2["Layer 2 · Execution Layer (Deterministic + LLM)"]
         direction LR
-        DISP["⚙️ Dispatcher<br/>────────────────<br/>纯代码，无 LLM<br/>仅在 current_task={}时<br/>pop(0) 填入执行槽"]
-        EXEC["🤖 Executor<br/>────────────────<br/>动态加载 Skill<br/>调用 skill.execute()<br/>写入 last_result"]
-        FLUSH["🧹 Context Flush<br/>────────────────<br/>纯代码，无 LLM<br/>成功→清空槽<br/>失败→设 halt_flag"]
+        DISP["⚙️ Dispatcher<br/>────────────────<br/>Code only, no LLM<br/>Only when current_task={}<br/>pop(0) into execution slot"]
+        EXEC["🤖 Executor<br/>────────────────<br/>Dynamically loads Skill<br/>Calls skill.execute()<br/>Writes last_result"]
+        FLUSH["🧹 Context Flush<br/>────────────────<br/>Code only, no LLM<br/>Success → clear slot<br/>Failure → set halt_flag"]
         DISP --> EXEC --> FLUSH
     end
 
-    subgraph HILP["人工干预层（HILP）"]
-        HI["👤 Human Intervention<br/>────────────────<br/>interrupt() 暂停图<br/>等待 retry / abort<br/>Command(resume=...)"]
+    subgraph HILP["Human Intervention Layer (HILP)"]
+        HI["👤 Human Intervention<br/>────────────────<br/>interrupt() pauses the graph<br/>Wait for retry / abort<br/>Command(resume=...)"]
     end
 
-    subgraph SKILIB["SkiLib 技能库"]
+    subgraph SKILIB["SkiLib Skill Library"]
         direction TB
-        SKILLS["Skills（高层，平台无关）<br/>PickAndPlace / TaskSkills"]
-        PRIMS["Primitives（底层，RoboDK 相关）<br/>MoveJ / MoveL / Grasp / Release / SceneQuery"]
-        REG["SkillRegistry（单例）<br/>@skill 装饰器自动注册<br/>动态生成 LLM Tool Schema"]
-        CTX["RobotContext（单例）<br/>RoboDK 连接管理<br/>get_current_state()"]
+        SKILLS["Skills (high-level, platform-agnostic)<br/>PickAndPlace / TaskSkills"]
+        PRIMS["Primitives (low-level, RoboDK-related)<br/>MoveJ / MoveL / Grasp / Release / SceneQuery"]
+        REG["SkillRegistry (singleton)<br/>@skill decorator auto-registers<br/>Dynamically generates LLM Tool Schema"]
+        CTX["RobotContext (singleton)<br/>RoboDK connection management<br/>get_current_state()"]
         SKILLS --> PRIMS
         REG --> SKILLS
         CTX --> PRIMS
@@ -43,10 +43,10 @@ graph TB
     NL --> SUP
     PLAN -->|"todo_list"| DISP
     FLUSH -->|"halt_flag=True"| HI
-    HI -->|"retry → 保留 current_task"| EXEC
-    HI -->|"abort → 清空队列"| FLUSH
+    HI -->|"retry → keep current_task"| EXEC
+    HI -->|"abort → clear queue"| FLUSH
     EXEC <-->|"skill.execute()"| SKILIB
-    SUP <-->|"task-skills 查询"| SKILIB
+    SUP <-->|"task-skills query"| SKILIB
 ```
 
 ---
@@ -57,28 +57,28 @@ graph TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Supervisor : 收到自然语言指令
+    [*] --> Supervisor : Receive natural language instruction
 
     state Supervisor {
         [*] --> ReActLoop
-        ReActLoop --> ReActLoop : tool_call（查询场景/规范）
-        ReActLoop --> [*] : 无 tool_call（知识饱和）
-        ReActLoop --> HILP_Trigger : 调用 request_human_intervention
+        ReActLoop --> ReActLoop : tool_call (query scene/spec)
+        ReActLoop --> [*] : no tool_call (knowledge saturation)
+        ReActLoop --> HILP_Trigger : call request_human_intervention
     }
 
-    Supervisor --> Planner : 知识饱和
+    Supervisor --> Planner : knowledge saturation
     HILP_Trigger --> HumanIntervention : interrupt
 
     state Planner {
         [*] --> StructuredOutput
-        StructuredOutput --> Retry : Pydantic 校验失败
-        Retry --> StructuredOutput : 重试（最多3次）
-        StructuredOutput --> [*] : 校验通过（支持 auto/manual 混排）
-        Retry --> HaltPlanning : 重试耗尽
+        StructuredOutput --> Retry : Pydantic validation failed
+        Retry --> StructuredOutput : retry (up to 3 times)
+        StructuredOutput --> [*] : validation passed (supports mixed auto/manual)
+        Retry --> HaltPlanning : retries exhausted
     }
     HaltPlanning --> HumanIntervention
 
-    Planner --> FlushSupervisorMsg : 清除 Supervisor 消息
+    Planner --> FlushSupervisorMsg : clear Supervisor messages
     FlushSupervisorMsg --> Dispatcher
 
     state ExecutionLoop {
@@ -99,9 +99,9 @@ stateDiagram-v2
 
         state Executor {
             [*] --> ReActLoop2
-            ReActLoop2 --> ReActLoop2 : 内部恢复重试
-            ReActLoop2 --> WriteSuccess : 成功
-            ReActLoop2 --> WriteFailHILP : 放弃 needs_hilp=True
+            ReActLoop2 --> ReActLoop2 : internal recovery retries
+            ReActLoop2 --> WriteSuccess : success
+            ReActLoop2 --> WriteFailHILP : give up needs_hilp=True
             WriteSuccess --> [*]
             WriteFailHILP --> [*]
         }
@@ -113,28 +113,28 @@ stateDiagram-v2
             CheckResult --> ClearSlot : success=true
             CheckResult --> CheckNeedsHilp : success=false
             CheckNeedsHilp --> SetHalt : needs_hilp=true\nhalt_reason=TASK_FAILURE
-            CheckNeedsHilp --> SetHalt : needs_hilp=false\n（保守 fallthrough）
+            CheckNeedsHilp --> SetHalt : needs_hilp=false\n(conservative fallthrough)
             ClearSlot --> [*]
             SetHalt --> [*]
         }
     }
 
-    ContextFlush --> Dispatcher : todo_list 非空 且 halt=false
-    ContextFlush --> Done : todo_list 空 且 halt=false
+    ContextFlush --> Dispatcher : todo_list not empty and halt=false
+    ContextFlush --> Done : todo_list empty and halt=false
     ContextFlush --> HumanIntervention : halt_flag=true
 
     state HumanIntervention {
         [*] --> WaitOperator
-        WaitOperator --> RetryAction : action=retry\n（仅 TASK_FAILURE 有效）
-        WaitOperator --> CompleteAction : action=complete\n（仅 MANUAL_TASK 有效）
+        WaitOperator --> RetryAction : action=retry\n(valid only for TASK_FAILURE)
+        WaitOperator --> CompleteAction : action=complete\n(valid only for MANUAL_TASK)
         WaitOperator --> AbortAction : action=abort
-        RetryAction --> [*] : 清除 halt，保留 current_task
-        CompleteAction --> [*] : 清除 halt，清空 current_task
-        AbortAction --> [*] : 清空 current_task + todo_list
+        RetryAction --> [*] : clear halt, keep current_task
+        CompleteAction --> [*] : clear halt, clear current_task
+        AbortAction --> [*] : clear current_task + todo_list
     }
 
-    HumanIntervention --> Executor : retry → 重试同一任务
-    HumanIntervention --> Dispatcher : complete → 继续队列
+    HumanIntervention --> Executor : retry → retry same task
+    HumanIntervention --> Dispatcher : complete → continue queue
     HumanIntervention --> Done : abort
     Done --> [*]
 ```
@@ -147,35 +147,35 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-    subgraph STATE["GlobalState（LangGraph 共享状态）"]
+    subgraph STATE["GlobalState (LangGraph shared state)"]
         direction TB
-        MSG["messages: list[BaseMessage]<br/>消息总线（operator.add）"]
-        TODO["todo_list: list[dict]<br/>支持 auto/manual 混排"]
-        CUR["current_task: dict<br/>执行槽：{} = 空闲"]
-        LAST["last_result: Optional[dict]<br/>含 needs_hilp 字段"]
-        HALT["halt_flag: bool<br/>HILP 触发器"]
+        MSG["messages: list[BaseMessage]<br/>message bus (operator.add)"]
+        TODO["todo_list: list[dict]<br/>supports mixed auto/manual"]
+        CUR["current_task: dict<br/>execution slot: {} = idle"]
+        LAST["last_result: Optional[dict]<br/>includes needs_hilp field"]
+        HALT["halt_flag: bool<br/>HILP trigger"]
         HREASON["halt_reason: Optional[str]<br/>TASK_FAILURE / MANUAL_TASK"]
-        LOG["execution_log: list[str]<br/>审计轨迹（operator.add）"]
-        RS["robot_state: RobotState<br/>位姿/关节角快照"]
+        LOG["execution_log: list[str]<br/>audit trail (operator.add)"]
+        RS["robot_state: RobotState<br/>pose/joint snapshot"]
     end
 
-    PLAN_NODE["Planner"] -->|"写入"| TODO
-    DISP_NODE["Dispatcher"] -->|"pop(0) 填入"| CUR
-    DISP_NODE -->|"更新"| TODO
-    DISP_NODE -->|"manual任务：设True"| HALT
-    DISP_NODE -->|"manual任务：写入"| HREASON
-    EXEC_NODE["Executor"] -->|"写入（含needs_hilp）"| LAST
-    EXEC_NODE -->|"写入"| LOG
-    CF_NODE["Context Flush"] -->|"成功：清空"| CUR
-    CF_NODE -->|"成功：清空"| LAST
-    CF_NODE -->|"成功：清空"| HREASON
-    CF_NODE -->|"失败needs_hilp=T：设True"| HALT
-    CF_NODE -->|"失败：写入TASK_FAILURE"| HREASON
-    CF_NODE -->|"写入"| LOG
-    HI_NODE["Human Intervention"] -->|"所有动作：清除"| HALT
-    HI_NODE -->|"所有动作：清除"| HREASON
-    HI_NODE -->|"complete/abort：清空"| CUR
-    HI_NODE -->|"abort：清空"| TODO
+    PLAN_NODE["Planner"] -->|"write"| TODO
+    DISP_NODE["Dispatcher"] -->|"pop(0) fill"| CUR
+    DISP_NODE -->|"update"| TODO
+    DISP_NODE -->|"manual task: set True"| HALT
+    DISP_NODE -->|"manual task: write"| HREASON
+    EXEC_NODE["Executor"] -->|"write (includes needs_hilp)"| LAST
+    EXEC_NODE -->|"write"| LOG
+    CF_NODE["Context Flush"] -->|"success: clear"| CUR
+    CF_NODE -->|"success: clear"| LAST
+    CF_NODE -->|"success: clear"| HREASON
+    CF_NODE -->|"failure needs_hilp=T: set True"| HALT
+    CF_NODE -->|"failure: write TASK_FAILURE"| HREASON
+    CF_NODE -->|"write"| LOG
+    HI_NODE["Human Intervention"] -->|"all actions: clear"| HALT
+    HI_NODE -->|"all actions: clear"| HREASON
+    HI_NODE -->|"complete/abort: clear"| CUR
+    HI_NODE -->|"abort: clear"| TODO
 ```
 
 ---
@@ -184,40 +184,40 @@ flowchart LR
 
 ```mermaid
 graph TB
-    subgraph AGENT["Agent 层（LangGraph）"]
+    subgraph AGENT["Agent Layer (LangGraph)"]
         SUP2["Supervisor"]
         EXEC2["Executor"]
     end
 
-    subgraph REGISTRY["SkillRegistry（单例）"]
-        DEC["@skill 装饰器<br/>import 时自动注册"]
-        SCHEMA["get_llm_tool_schemas()<br/>Anthropic 格式"]
-        LIST["list_skills(category)<br/>供 Supervisor 查询"]
+    subgraph REGISTRY["SkillRegistry (singleton)"]
+        DEC["@skill decorator<br/>auto-register on import"]
+        SCHEMA["get_llm_tool_schemas()<br/>Anthropic format"]
+        LIST["list_skills(category)<br/>queried by Supervisor"]
     end
 
-    subgraph SKILLS2["Skills（平台无关）"]
+    subgraph SKILLS2["Skills (platform-agnostic)"]
         PAP["PickAndPlace"]
         TS["TaskSkills<br/>list_targets / get_target_info<br/>query_assembly_spec<br/>request_human_intervention"]
     end
 
-    subgraph PRIMS2["Primitives（RoboDK 相关）"]
-        MJ["MoveJ<br/>关节运动"]
-        ML["MoveL<br/>直线运动"]
-        GR["Grasp / Release<br/>夹爪"]
+    subgraph PRIMS2["Primitives (RoboDK-related)"]
+        MJ["MoveJ<br/>joint motion"]
+        ML["MoveL<br/>linear motion"]
+        GR["Grasp / Release<br/>gripper"]
         SQ["SceneQuery<br/>ListItems / GetTargetPose<br/>GetApproachTarget / CheckReachable"]
     end
 
-    subgraph CONTEXT["RobotContext（单例）"]
-        RDK2["RoboDK 连接<br/>RDK + robot 对象"]
-        STATE2["get_current_state()<br/>→ RobotState 快照"]
+    subgraph CONTEXT["RobotContext (singleton)"]
+        RDK2["RoboDK connection<br/>RDK + robot object"]
+        STATE2["get_current_state()<br/>→ RobotState snapshot"]
     end
 
-    subgraph SPECS["工艺规范"]
-        YAML["specs/*.yaml<br/>零件ID / 目标位置 / 工序约束"]
+    subgraph SPECS["Process specs"]
+        YAML["specs/*.yaml<br/>Part IDs / target positions / process constraints"]
     end
 
-    SUP2 -->|"工具调用"| SCHEMA
-    EXEC2 -->|"动态加载"| REGISTRY
+    SUP2 -->|"tool call"| SCHEMA
+    EXEC2 -->|"dynamic load"| REGISTRY
     REGISTRY --> SKILLS2
     SKILLS2 --> PRIMS2
     PRIMS2 --> CONTEXT
@@ -240,46 +240,108 @@ graph TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Empty : 初始化
+    [*] --> Empty : initialized
 
     Empty : current_task = {}
     AutoOccupied : current_task = {type=auto, skill, params}
     ManualPending : current_task = {type=manual, description}\nhalt_flag=T, halt_reason=MANUAL_TASK
-    Failed : current_task 保留（原值不变）\nhalt_flag=T, halt_reason=TASK_FAILURE
+    Failed : current_task retained (unchanged)\nhalt_flag=T, halt_reason=TASK_FAILURE
 
     Empty --> AutoOccupied : Dispatcher.pop(0) type=auto
     Empty --> ManualPending : Dispatcher.pop(0) type=manual
-    AutoOccupied --> Empty : Context Flush（success=True）
-    AutoOccupied --> Failed : Context Flush（needs_hilp=True）
-    Failed --> AutoOccupied : Human Intervention action=retry\n（清除 halt，保留槽）
+    AutoOccupied --> Empty : Context Flush (success=True)
+    AutoOccupied --> Failed : Context Flush (needs_hilp=True)
+    Failed --> AutoOccupied : Human Intervention action=retry\n(clear halt, keep slot)
     Failed --> Empty : Human Intervention action=abort
-    ManualPending --> Empty : Human Intervention action=complete\n（清除 halt，清空槽）
+    ManualPending --> Empty : Human Intervention action=complete\n(clear halt, clear slot)
     ManualPending --> Empty : Human Intervention action=abort
 
-    note right of Empty : Dispatcher 看到 {} 才会填入新任务
-    note right of Failed : Dispatcher 看到非空槽跳过，不覆盖
-    note right of ManualPending : Executor 不参与，直接等待操作员
+    note right of Empty : Dispatcher fills a new task only when slot is {}
+    note right of Failed : Dispatcher skips non-empty slot and does not overwrite
+    note right of ManualPending : Executor is bypassed; wait directly for operator
 ```
 
 ---
 
-## 6. @require_robot_active 守卫机制
+## 6. Agent 高层控制流（概览）
+
+> 展示从自然语言指令到任务完成的完整主路径，以及 HILP 挂起与恢复的关键分支。
+> 省略节点内部细节（ReAct 循环、retry 逻辑等），聚焦于**节点间的路由决策**。
 
 ```mermaid
 flowchart TD
-    CALL["R-skill 调用<br/>e.g. move_to_target()"]
+    START(["🟢 Natural language instruction<br/>e.g. 'Place Part_A into Tray_1'"])
+
+    subgraph L1["Layer 1 · Planning"]
+        SUP["🧠 Supervisor<br/><i>ReAct loop · knowledge saturation</i>"]
+        PLAN["📋 Planner<br/><i>structured output · generate todo_list</i>"]
+        SUP -->|"knowledge saturated"| PLAN
+    end
+
+    subgraph L2["Layer 2 · Execution loop"]
+        DISP["⚙️ Dispatcher<br/><i>pop(0) when slot is empty</i>"]
+        EXEC["🤖 Executor<br/><i>load Skill · execute · write last_result</i>"]
+        CF["🧹 Context Flush<br/><i>pure code · inspect last_result</i>"]
+
+        DISP -->|"type=auto"| EXEC
+        EXEC --> CF
+    end
+
+    subgraph HILP["Human Intervention Layer"]
+        HI["👤 Human Intervention<br/><i>interrupt() · await operator action</i>"]
+    end
+
+    DONE(["🏁 Done"])
+
+    %% ── happy path ──
+    START --> SUP
+    PLAN -->|"todo_list"| DISP
+
+    %% ── Dispatcher branches ──
+    DISP -->|"type=manual<br/>halt_reason=MANUAL_TASK"| HI
+    DISP -->|"queue empty · slot empty"| DONE
+
+    %% ── Context Flush branches ──
+    CF -->|"✅ success<br/>clear slot"| DISP
+    CF -->|"📭 queue empty · no halt"| DONE
+    CF -->|"❌ needs_hilp=True<br/>halt_reason=TASK_FAILURE"| HI
+
+    %% ── HumanIntervention exits ──
+    HI -->|"retry<br/>keep current_task"| EXEC
+    HI -->|"complete<br/>clear current_task"| DISP
+    HI -->|"abort<br/>clear queue"| DONE
+
+    %% ── Supervisor HILP ──
+    SUP -.->|"request_human_intervention"| HI
+
+    %% ── 样式 ──
+    style L1   fill:#dbeafe,stroke:#3b82f6
+    style L2   fill:#d1fae5,stroke:#10b981
+    style HILP fill:#fef3c7,stroke:#f59e0b
+    style START fill:#f0fdf4,stroke:#16a34a
+    style DONE  fill:#f0fdf4,stroke:#16a34a
+    style HI    fill:#fef9c3,stroke:#ca8a04
+```
+
+---
+
+## 7. @require_robot_active 守卫机制
+
+```mermaid
+flowchart TD
+    CALL["R-skill call<br/>e.g. move_to_target()"]
     CHECK{{"halt_flag == True ?"}}
     BYPASS{{"bypass_halt == True ?"}}
-    BLOCK["返回 SkillResult\nsuccess=False\nerror_type=ROBOT_INACTIVE"]
-    EXEC3["正常执行 skill"]
+    BLOCK["Return SkillResult\nsuccess=False\nerror_type=ROBOT_INACTIVE"]
+    EXEC3["Execute skill normally"]
 
     CALL --> CHECK
-    CHECK -->|"否"| EXEC3
-    CHECK -->|"是"| BYPASS
-    BYPASS -->|"否（普通 R-skill）"| BLOCK
-    BYPASS -->|"是（白名单）"| EXEC3
+    CHECK -->|"No"| EXEC3
+    CHECK -->|"Yes"| BYPASS
+    BYPASS -->|"No (regular R-skill)"| BLOCK
+    BYPASS -->|"Yes (whitelist)"| EXEC3
 
-    subgraph WHITELIST["白名单（bypass_halt=True）"]
+    subgraph WHITELIST["Whitelist (bypass_halt=True)"]
         R["resume()"]
         RHI["request_human_intervention()"]
     end
