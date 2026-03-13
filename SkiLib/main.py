@@ -12,7 +12,7 @@ from SkiLib.skills.pick_and_place import PickAndPlace
 context = RobotContext()
 
 # ============= Use Primitives directly =============
-moveJ = context.primitives['MoveJ']
+MoveJ = context.primitives.get('MoveJ')   # Get MoveJ primitive
 
 # ============= Use Skills (pass full registry) =============
 pick_place = PickAndPlace(context.primitives)   # registry validates required primitives
@@ -22,8 +22,8 @@ if __name__ == "__main__":
     place  = context.RDK.Item("App Place Part A")
 
     # Primitive直接使用
-    result = moveJ.check(target=target)
-    print(result.toPlainText())
+    result = MoveJ.check(target=target) # type: ignore
+    print(result)
 
     # Skill组合使用
     pick_place.try_execute(target, place)
