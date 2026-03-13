@@ -94,6 +94,9 @@ RoboSkiAgent/
 - ✅ **填充空槽**：仅当 `current_task == {}` 时才 `pop(0)` 填入；槽已有任务时跳过不覆盖
 - ❌ 禁止引入任何 LLM 推理，任务流转必须 100% 确定性
 
+> [2026-03-13 更新] 新增 manual 任务路径：
+- ✅ **manual 任务**：填入 `type="manual"` 的任务时，同时设 `halt_flag=True`、`halt_reason="MANUAL_TASK"`，由 `after_dispatcher` 条件边路由到 `human_intervention`，绕过 Executor
+
 **Executor**
 - 只关注当前 `current_task`，动态加载 P/R/E-skills 完成单步物理动作
 - ✅ 执行结果写入 `last_result`（数据用途），Context Flush 据此决定成功/失败路径
@@ -105,6 +108,20 @@ RoboSkiAgent/
 - ✅ **失败时**：设置 `halt_flag = True`；`current_task` 与 `todo_list` 保持不变，resume 后直接重试同一任务
 - 用 `RemoveMessage` 抹除 Executor 产生的 `ToolMessage` 噪音
 - ❌ 绝不删除上层下发的 `current_task` 相关消息
+
+> [2026-03-13 更新] 失败路径细化：
+- ✅ **失败且 `last_result.needs_hilp=True`**：设 `halt_flag=True`，设 `halt_reason="TASK_FAILURE"`；`current_task/todo_list` 保持不变
+- ✅ **失败且 `last_result.needs_hilp=False`**：理论上不应出现（Executor 未放弃时不应退出节点）；若出现，保守 fallthrough 至 halt，不允许静默跳过失败任务
+- ✅ **成功时**：额外清空 `halt_reason=None`
+
+**HumanIntervention**（LangGraph interrupt，新增节点）
+- 接收两类入口：
+  - `halt_reason="TASK_FAILURE"`：Executor 无法自愈，操作员选择 `retry` 或 `abort`
+  - `halt_reason="MANUAL_TASK"`：计划内人工任务，操作员选择 `complete` 或 `abort`
+- `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务
+- `complete`：清除 `halt_flag/halt_reason`，清空 `current_task` → Dispatcher 推进到下一任务
+- `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
+- ❌ `retry` 对 `MANUAL_TASK` 非法（会导致 Executor 找不到 skill 进入无限 HILP 循环），节点内强制降级为 `abort`
 
 ---
 
@@ -120,6 +137,24 @@ class GlobalState(TypedDict):
     execution_log: list[str]     # 极简状态上报，由 Context Flush 写入
     messages: list[BaseMessage]  # LangGraph 消息列表
 ```
+
+> [2026-03-13 更新] 新增两个字段：
+```python
+class GlobalState(TypedDict):
+    # ... 原有字段不变 ...
+    halt_reason: Optional[str]   # "TASK_FAILURE" | "MANUAL_TASK" | None；HumanIntervention 节点读取以展示正确提示
+    _hi_action:  Optional[str]   # 内部路由字段：human_intervention 写入，after_human_intervention 读取，不对外暴露
+```
+
+**todo_list 任务格式（新增 `type` 字段）：**
+```python
+# 自动任务（由 Executor 执行）
+{"task_id": "t1", "type": "auto",   "skill": "PickAndPlace", "params": {...}}
+
+# 人工任务（Dispatcher 直接路由到 human_intervention，不经过 Executor）
+{"task_id": "t2", "type": "manual", "description": "手动拧紧 M10 螺栓至 25 N·m"}
+```
+Planner 可在同一 `todo_list` 中混排，Dispatcher 按 `type` 字段自动路由，完全确定性。
 
 **`current_task` 作为执行槽的状态语义（单一真相来源）：**
 - `{}` → 槽空闲，Dispatcher 负责填入下一个任务
@@ -145,6 +180,19 @@ class SkillResult:
     suggestion: Optional[str]         # "尝试从上方接近" / "请求人工介入"
     data: Optional[dict]              # 技能返回的有效数据
 ```
+
+> [2026-03-13 更新] 新增 `needs_hilp` 字段：
+```python
+@dataclass
+class SkillResult:
+    # ... 原有字段不变 ...
+    needs_hilp: bool = True
+    # True（默认）= Executor 已放弃，Context Flush 应触发 HILP
+    # False       = Executor 内部 ReAct 仍在尝试恢复，此状态不应从 Executor 节点输出；
+    #               若 Context Flush 意外收到 success=False + needs_hilp=False，
+    #               保守处理为 needs_hilp=True（防止静默跳过失败任务）
+```
+**stub 阶段默认值 `True` 与现有行为完全一致**，不破坏当前测试。Phase 3 实现真实 Executor ReAct 后，内部循环在放弃时才设 `needs_hilp=True` 退出节点。
 
 ---
 
@@ -185,7 +233,7 @@ def request_human_intervention(self, reason: str) -> SkillResult: ...
 ### 新增 Primitive 规范
 
 1. 继承 `BasePrimitive`，放入 `primitives/` 对应模块
-2. `check()` 必须实现完整（`MoveL.check()` 当前待完成，是已知 TODO）
+2. `check()` 必须实现完整（`MoveL.check()` 已实现，见 2026-03-13 更新）
 3. `execute()` 内部异常全部捕获，返回 `SkillResult`，禁止向上抛出
 4. 仿真/真机差异在 primitive 层屏蔽，上层不感知
 
@@ -199,8 +247,8 @@ def request_human_intervention(self, reason: str) -> SkillResult: ...
 
 ## 已知风险，开发时需特别注意
 
-**MoveL.check() 尚未实现**
-`primitives/motion.py` 中 `MoveL.check()` 是空函数体，当前所有直线运动跳过 pre-flight 校验直接执行。补全前不得在生产流程中依赖 MoveL 的检查结果。
+**MoveL.check() 已实现** *(2026-03-13)*
+`primitives/motion.py` 中 `MoveL.check()` 通过 `MoveL_Test` 检查碰撞和全路径 IK 可解性（含奇点检测）。原空函数体说明已过期，此条目保留迭代记录。
 
 **本地 LLM Structured Output 不稳定**
 Planner 的 JSON 输出必须加 Schema 校验 + retry 逻辑。不要假设模型每次都输出合法 JSON。
