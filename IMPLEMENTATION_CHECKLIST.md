@@ -176,6 +176,49 @@
 
 ---
 
+## Phase 5 · 可观测性：print → logging 统一迁移
+
+*将全库所有 `print()` 替换为结构化 logging，同时输出到控制台和日志文件。*
+
+- [ ] **5.1** 新建 `SkiLib/log.py`：统一 Logger 工厂
+  - `get_logger(name: str) -> logging.Logger`：返回已配置的模块级 logger
+  - 两个 Handler：`StreamHandler`（控制台，同步 `print` 原有行为）+ `RotatingFileHandler`（写入 `logs/roboski.log`，单文件 10 MB，保留 5 份）
+  - 格式：`%(asctime)s [%(levelname)s] %(name)s — %(message)s`
+  - 日志级别通过环境变量 `ROBOSKI_LOG_LEVEL`（默认 `INFO`）控制，无需改代码切换
+  - 首次 import `SkiLib` 时自动完成根 logger 配置（放入 `SkiLib/__init__.py`）
+
+- [ ] **5.2** `SkiLib/graph.py` 迁移
+  - 模块顶部：`logger = get_logger("graph")`
+  - 各节点 `print()` → `logger.info()` / `logger.debug()` / `logger.warning()`
+  - 级别约定：
+    - `INFO`：节点入口/出口、任务 dispatch、HILP 触发
+    - `DEBUG`：Supervisor 每次 tool_call 详情、Executor 内部重试
+    - `WARNING`：保守 fallthrough（`needs_hilp=False + success=False`）、manual 任务 retry 降级
+    - `ERROR`：Planner retry 耗尽、未知 skill
+
+- [ ] **5.3** `SkiLib/primitives/` 迁移
+  - 各 primitive 模块顶部：`logger = get_logger("primitives.<module_name>")`
+  - `execute()` 和 `check()` 中的 `print()` → `logger.debug()`
+  - 异常捕获处：`logger.error(..., exc_info=True)` 保留 traceback（不上抛）
+
+- [ ] **5.4** `SkiLib/skills/` 迁移
+  - 同 5.3，logger 命名空间：`"skills.<module_name>"`
+
+- [ ] **5.5** `SkiLib/robotcontext.py` 迁移
+  - RoboDK 连接成功/失败：`logger.info()` / `logger.error()`
+  - Registry 扫描结果：`logger.debug()`
+
+- [ ] **5.6** Notebook (`Agent/LangGraph.ipynb`) 迁移
+  - 保留 `logging.basicConfig(level=logging.INFO)` 初始化 cell
+  - 节点函数中 `print()` → `logger.info()`（Notebook 环境 StreamHandler 即等同于 print）
+  - 测试 cell 中调试用 `print()` 可保留（非生产代码）
+
+- [ ] **5.7** 验证
+  - 运行 `SkiLib/main.py`：确认控制台输出与写入 `logs/roboski.log` 内容一致
+  - 确认无任何 `print()` 残留于 `SkiLib/` 生产代码（`grep -r "print(" SkiLib/ --include="*.py"`）
+
+---
+
 ## 关键文件索引
 
 | 文件 | 状态 | Phase |

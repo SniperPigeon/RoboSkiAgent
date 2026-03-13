@@ -22,6 +22,7 @@
 ---
 - 当发现原文档的设计有问题时或与你探讨出有问题时，应在许可后将发现更新至文档并修改原来的表述，但是不要直接替换以保留迭代过程。
 - 在规划时思考隐藏的逻辑问题，包括但不限于造成逻辑死锁的设计、兜底过多导致过度静默处理错误都应避免。
+- **禁止在 `SkiLib/` 生产代码中使用 `print()`**，一律通过 `SkiLib/log.py` 提供的 `get_logger(__name__)` 获取模块级 logger 输出。Logger 配置双 Handler（控制台 StreamHandler + 轮转文件 RotatingFileHandler），行为与 print 等价但支持级别过滤和持久化。Notebook 实验代码不受此约束。详见 Phase 5 实现计划。
 ---
 
 
@@ -242,6 +243,64 @@ def request_human_intervention(self, reason: str) -> SkillResult: ...
 1. 继承 `BaseSkill`，放入 `skills/` 目录
 2. 在 `REQUIRED_PRIMITIVES` 中声明所有依赖
 3. 返回类型必须是 `SkillResult`
+
+### SkillRegistry 与 LLM Tool 生成
+
+> [2026-03-13 新增]
+
+**SkillRegistry**（对应 `PrimitiveRegistry`）在启动时自动扫描 `skills/` 目录，发现所有 `BaseSkill` 子类并用 primitives 注入实例化。
+
+**Tool Schema 生成原则**：`BaseSkill` 提供 `as_tools()` 方法，通过反射将 `check / execute / try_execute` 三个方法自动包装为 `StructuredTool`，供 Executor ReAct 循环的 `llm.bind_tools()` 使用。
+
+**底层机制**：Python 绑定方法（bound method）已捕获 `self`，LangChain 的 `StructuredTool.from_function` 通过 `inspect.signature` 读取类型注解自动生成 JSON Schema，LLM 只看到参数字典，不感知实例存在。
+
+**Skill 方法签名约定**：
+- `check / execute / try_execute` 三个方法**签名必须一致**，参数全部使用基础类型（`str`、`int`、`float`）表示符号 ID
+- **符号解析**（`"Target_A"` → RoboDK Item）在方法体内通过 `RobotContext.instance()` 完成，上层不感知 Python 对象
+
+```python
+# ✅ 正确：参数为符号字符串，方法内解析
+class PickAndPlace(BaseSkill):
+    SKILL_DESCRIPTION = "Pick an object from pick_target and place it at place_target."
+
+    def execute(self, pick_target: str, place_target: str, approach_height: int = 100) -> SkillResult:
+        """Execute pick and place. pick_target/place_target are RoboDK target names."""
+        ctx = RobotContext.instance()
+        pick_item  = ctx.RDK.Item(pick_target)   # 符号 → Python 对象
+        place_item = ctx.RDK.Item(place_target)
+        ...
+
+# ❌ 错误：参数为 Python 对象，LLM 无法序列化
+def execute(self, pick_target: robolink.Item, ...) -> SkillResult: ...
+```
+
+**`as_tools()` 实现模式**（在 `BaseSkill` 中统一实现，子类无需重写）：
+
+```python
+def as_tools(self) -> List[StructuredTool]:
+    skill_name = type(self).__name__
+    tools = []
+    for method_name in ("check", "execute", "try_execute"):
+        method = getattr(self, method_name)   # bound method，self 已捕获
+        @functools.wraps(method)
+        def _wrapper(*args, _m=method, **kwargs):
+            result = _m(*args, **kwargs)
+            return result.to_llm_message() if isinstance(result, SkillResult) else result
+        tools.append(StructuredTool.from_function(
+            func=_wrapper,
+            name=f"{skill_name}.{method_name}",
+            description=method.__doc__ or f"{skill_name} {method_name}",
+        ))
+    return tools
+```
+
+**Executor 使用方式**：
+
+```python
+tools = skill_registry.get_tools()   # 所有 skill 的 as_tools() 展平
+llm_with_tools = llm.bind_tools(tools)
+# LLM 可调用：PickAndPlace.check / PickAndPlace.execute / PickAndPlace.try_execute
+```
 
 ---
 
