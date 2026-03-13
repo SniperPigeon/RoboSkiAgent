@@ -132,11 +132,88 @@ class MoveL(BasePrimitive):
         self.RDK:   robolink.Robolink = RDK_object
         
     def check(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None) -> SkillResult:
-        # TODO: implement MoveL_Test pre-flight check (known pending item per CLAUDE.md)
+        # Validate target type and ref_frame requirement
+        if isinstance(target, robomath.Mat):
+            if ref_frame is None:
+                return SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.VALIDATION,
+                    error_type=ERROR_MISSING_REF_FRAME,
+                    message="A pose target must be accompanied by a reference frame.",
+                    suggestion="Provide a reference frame when using pose targets.",
+                )
+        elif not isinstance(target, (Item, list)):
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type=ERROR_INVALID_PARAM,
+                message="Invalid target type. Target must be an Item, a list of joint values, or a Mat pose.",
+                suggestion="Provide a valid target: Item, list of joint values, or Mat pose with reference frame.",
+            )
+
+        start = self.robot.Joints()
+
+        # Resolve target to a Mat pose for MoveL_Test (which only accepts Mat as pose arg).
+        # MoveL_Test return codes (never raises):
+        #   0  → path valid and collision-free
+        #  -2  → target pose unreachable (IK failure at endpoint)
+        #  -1  → target reachable but linear path infeasible (singularity or workspace boundary
+        #         violated along the Cartesian trajectory)
+        #  > 0 → number of collision pairs detected
+        if isinstance(target, robomath.Mat):
+            assert ref_frame is not None  # guaranteed by the validation block above
+            # Express pose in robot base frame so MoveL_Test uses a consistent reference.
+            target_pose: robomath.Mat = ref_frame * target
+        elif isinstance(target, list):
+            # Joint values → FK gives pose in robot base frame.
+            target_pose = self.robot.SolveFK(target)
+        else:
+            # Item: get its pose in the world frame then express it relative to robot base.
+            target_pose = self.robot.PoseFrame().inv() * target.Pose()
+
+        self.RDK.setCollisionActive(True)
+        test_result = self.robot.MoveL_Test(start, target_pose)
+        self.RDK.setCollisionActive(False)
+
+        if test_result == 0:
+            return SkillResult(
+                success=True,
+                execution_phase=ExecutionPhase.PLANNING,
+                message="Linear path is valid and collision-free.",
+            )
+        if test_result == -2:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=ERROR_IK_FAILURE,
+                message="Target pose is outside the robot's reachable workspace.",
+                suggestion=(
+                    "Verify the target coordinates and orientation. "
+                    "Consider adjusting the approach direction or using a different configuration."
+                ),
+            )
+        if test_result == -1:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=ERROR_IK_FAILURE,
+                message="Target is reachable but the linear path passes through a singularity or workspace boundary.",
+                suggestion=(
+                    "The robot cannot maintain a straight-line Cartesian path to the target. "
+                    "Use MoveJ to avoid the singularity, or approach from a different direction."
+                ),
+            )
         return SkillResult(
-            success=True,
+            success=False,
             execution_phase=ExecutionPhase.PLANNING,
-            message="MoveL pre-flight check not yet implemented; skipping.",
+            error_type=ERROR_COLLISION,
+            message="Linear path would cause collisions in the station.",
+            data={"collision_count": test_result},
+            suggestion=(
+                "This count includes all collisions in the station, not just those on the linear path. "
+                "Some may be external or implicitly caused by this move. "
+                "Check the collision map to identify all collision pairs and adjust the approach direction."
+            ),
         )
     @require_robot_active(bypass_halt=False)
     def execute(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None, blocking: bool = True) -> SkillResult:

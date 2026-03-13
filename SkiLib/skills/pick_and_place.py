@@ -43,7 +43,7 @@ class PickAndPlace(BaseSkill):
             CheckResult with validation status
         """
         # Check 1: Can we reach pick position?
-        pick_check = self.primitives['moveJ'].check(pick_target)
+        pick_check = self.primitives['MoveJ'].check(pick_target)
         if not pick_check.is_valid:
             return CheckResult(
                 is_valid=False,
@@ -55,7 +55,7 @@ class PickAndPlace(BaseSkill):
             )
         
         # Check 2: Can we reach place position?
-        place_check = self.primitives['moveJ'].check(place_target)
+        place_check = self.primitives['MoveJ'].check(place_target)
         if not place_check.is_valid:
             return CheckResult(
                 is_valid=False,
@@ -97,7 +97,7 @@ class PickAndPlace(BaseSkill):
         
         # Phase 1: Pick
         print(f"[PickAndPlace] Moving to pick position...")
-        self.primitives['moveJ'].execute(pick_target)
+        self.primitives['MoveJ'].execute(pick_target)
         
         # TODO: When grasp primitive available:
         # self.primitives['grasp'].execute()
@@ -105,7 +105,7 @@ class PickAndPlace(BaseSkill):
         
         # Phase 2: Place
         print(f"[PickAndPlace] Moving to place position...")
-        self.primitives['moveJ'].execute(place_target)
+        self.primitives['MoveJ'].execute(place_target)
         
         # TODO: When release primitive available:
         # self.primitives['release'].execute()
