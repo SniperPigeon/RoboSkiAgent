@@ -61,11 +61,14 @@
   - 返回值：0=成功，-1=无法线性，-2=目标不可达，>0=碰撞数
   - 移除 `@require_robot_active(bypass_halt=False)` 冗余参数，改为无参数形式
 
-- [ ] **2.2** 新建 `SkiLib/primitives/gripper.py`
-  - `Grasp(tool_name=None) -> SkillResult`：调用 RoboDK 夹爪关闭接口（或仿真中 `robot.setDO()`）
-  - `Release(tool_name=None) -> SkillResult`：夹爪张开
+- [x] **2.2** 新建 `SkiLib/primitives/gripper.py` *(2026-03-17)*
+  - `Grasp(item: robolink.Item, tool: Optional[Item] = None) -> SkillResult`
+    - 仿真：`tool.AttachClosest()`；真机：TODO `setDO` + 反馈等待
+  - `Release(item: robolink.Item, tool: Optional[Item] = None) -> SkillResult`
+    - 仿真：`tool.DetachAll(station)`（物理语义：夹爪开→释放全部）；真机：TODO `setDO`
   - 两个原语均使用 `@require_robot_active` 保护
-  - `execution_phase = ExecutionPhase.GRIPPING / RELEASING`
+  - `execution_phase = ExecutionPhase.EXECUTION`（复用现有枚举，不新增 phase）
+  - **技术债务**：`robotcontext.py:141,150,167` 三处 `print()` 待 Phase 5.3 统一迁移
 
 - [ ] **2.3** 重写 `SkiLib/skills/pick_and_place.py`
   - **移除 `approach_height` 参数**；接近点从 RoboDK 树中按命名约定取（`GetApproachTarget`）
@@ -180,7 +183,7 @@
 
 *将全库所有 `print()` 替换为结构化 logging，同时输出到控制台和日志文件。*
 
-- [ ] **5.1** 新建 `SkiLib/log.py`：统一 Logger 工厂
+- [x] **5.1** 新建 `SkiLib/log.py`：统一 Logger 工厂 *(2026-03-17，提前实现)*
   - `get_logger(name: str) -> logging.Logger`：返回已配置的模块级 logger
   - 两个 Handler：`StreamHandler`（控制台，同步 `print` 原有行为）+ `RotatingFileHandler`（写入 `logs/roboski.log`，单文件 10 MB，保留 5 份）
   - 格式：`%(asctime)s [%(levelname)s] %(name)s — %(message)s`
