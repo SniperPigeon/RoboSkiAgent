@@ -8,23 +8,28 @@
 ## Phase 0 · SkillRegistry 基础设施
 *所有后续阶段的前置依赖*
 
-- [ ] **0.1** 新建 `SkiLib/registry.py`：`SkillRegistry` 单例
-  - `register(skill_class, metadata)` — 由 `@skill` 装饰器调用
+- [x] **0.1** 新建 `SkiLib/registry.py`：`SkillRegistry` 单例 *(2026-03-18)*
+  - ~~`register(skill_class, metadata)` — 由 `@skill` 装饰器调用~~ → 改为反射扫描（见 0.2 决策说明）
   - `set_robot_context(context)` — 触发 eager init，创建所有 Skill 实例
   - `get_skill(name)` / `registry[name]` — 返回已初始化实例
   - `list_skills(category=None)` — 列举已注册技能（供 Supervisor 查询）
-  - `get_llm_tool_schemas(format)` — 生成并缓存 Anthropic 格式工具 schema
+  - `get_llm_tool_schemas(format)` — 生成 Anthropic 格式工具 schema（基于 LangChain args_schema）
+  - `get_tools()` — 展平所有 skill.as_tools()，供 Executor llm.bind_tools() 使用
 
-- [ ] **0.2** 新建 `SkiLib/decorators.py`：`@skill(name, description, category, parameters)` 装饰器
-  - 在 import 时将类 + 元数据写入 `SkillRegistry`
+- [x] **0.2** ~~新建 `SkiLib/decorators.py`~~ **决策：不创建** *(2026-03-18)*
+  - **原计划**：`@skill` 装饰器在 import 时注册元数据
+  - **实际采用**：反射扫描（镜像 PrimitiveRegistry），元数据用类变量 `SKILL_DESCRIPTION / SKILL_CATEGORY` 声明
+  - **理由**：与 PrimitiveRegistry 完全一致，无循环导入风险，零样板代码
+  - `BaseSkill` 新增 `SKILL_DESCRIPTION: str = ""` 和 `SKILL_CATEGORY: str = "skill"` 类变量
+  - `BaseSkill` 新增 `as_tools() -> List[StructuredTool]`（按 CLAUDE.md 规范，lazy import LangChain）
 
-- [ ] **0.3** 更新 `SkiLib/__init__.py`：用 `pkgutil` 自动 import `primitives/` 和 `skills/` 下全部模块
-  - import 触发 `@skill` 装饰器执行 → 自动完成注册，**无需手工维护列表**
+- [x] **0.3** ~~更新 `SkiLib/__init__.py`~~ **无需改动** *(2026-03-18)*
+  - SkillRegistry 在 `set_robot_context()` 时自己扫描 `skills/`，不依赖 `__init__.py` 预先 import
 
-- [ ] **0.4** 更新 `SkiLib/robotcontext.py`：
-  - 移除 `PrimitiveRegistry` 中硬编码的 `from SkiLib.primitives import motion` 扫描逻辑
-  - 在 `RobotContext.__init__` 最后调用 `SkillRegistry.instance().set_robot_context(self)`
-  - 增加 `get_current_state() -> RobotState` 方法（关节角 + 位姿快照，供 GlobalState 初始化）
+- [x] **0.4** 更新 `SkiLib/robotcontext.py` *(2026-03-18)*
+  - `RobotContext.__init__` 末尾调用 `SkillRegistry().set_robot_context(self)`（local import 避免循环）
+  - 新增 `get_current_state() -> RobotState`（关节角 + 位姿快照，供 GlobalState 初始化）
+  - **技术债务保留**：`PrimitiveRegistry` 中 `from SkiLib.primitives import motion` 死代码未清理（Phase 5 统一处理）
 
 ---
 

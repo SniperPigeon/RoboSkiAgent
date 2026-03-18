@@ -62,6 +62,7 @@ RoboSkiAgent/
     │   └── IMPLEMENTATION_PLAN_SkillRegistry.md
     ├── examples/
     ├── log.py                      # Logger 工厂：get_logger(__name__)，双 Handler（控制台 + 轮转文件）
+    ├── registry.py                 # SkillRegistry 单例：反射扫描 skills/，实例化 BaseSkill，暴露 get_tools()
     ├── primitives/
     │   ├── motion.py               # MoveJ (完整) / MoveL (完整)
     │   └── gripper.py              # Grasp (完整，仿真) / Release (完整，仿真)
