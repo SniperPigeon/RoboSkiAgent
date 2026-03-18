@@ -62,13 +62,34 @@ class RobotContext:
 
         # Auto-initialize primitive registry
         self.primitive_registry = PrimitiveRegistry(self.robot, self.RDK)
+
+        # SkillRegistry eager init — must follow PrimitiveRegistry so primitives are ready
+        from SkiLib.registry import SkillRegistry  # local import avoids circular dependency
+        SkillRegistry().set_robot_context(self)
+
         self._initialized = True
-    
+
     @property
     def primitives(self) -> Dict[str, 'BasePrimitive']:
         """Quick access to primitive instances"""
         return self.primitive_registry.get_all()
-    
+
+    def get_current_state(self):
+        """
+        Capture current robot state snapshot.
+        Returns RobotState with None joints/pose if the robot is unreachable.
+        Suitable for initialising GlobalState.robot_state.
+        """
+        from SkiLib.base import RobotState  # local import avoids circular dependency
+        try:
+            return RobotState(
+                joints=list(self.robot.Joints()),
+                pose=self.robot.Pose(),
+                gripper_state="UNKNOWN",
+            )
+        except Exception:
+            return RobotState(gripper_state="UNKNOWN")
+
     # TODO Provide all variables in RoboDK Tree for LLM to access. But not sure where to put those.
 
 
