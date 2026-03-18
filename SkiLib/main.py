@@ -6,16 +6,17 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from SkiLib.robotcontext import RobotContext
-from SkiLib.skills.pick_and_place import PickAndPlace
+from SkiLib.registry import SkillRegistry
 
 # ============= Initialize =============
-context = RobotContext()
+context = RobotContext()  # also triggers SkillRegistry.set_robot_context() internally
 
 # ============= Use Primitives directly =============
 MoveJ = context.primitives.get('MoveJ')   # Get MoveJ primitive
 
-# ============= Use Skills (pass full registry) =============
-pick_place = PickAndPlace(context.primitives)   # registry validates required primitives
+# ============= Use Skills via SkillRegistry =============
+skill_registry = SkillRegistry()
+pick_place = skill_registry.get_skill('PickAndPlace')
 
 if __name__ == "__main__":
     target = context.RDK.Item("App Pick Part A")
