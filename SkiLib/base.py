@@ -292,6 +292,8 @@ class BaseSkill(ABC):
     """
 
     REQUIRED_PRIMITIVES: List[str] = []
+    SKILL_DESCRIPTION:   str       = ""      # Human/LLM-readable description for tool schemas
+    SKILL_CATEGORY:      str       = "skill" # Category tag for list_skills(category=) filtering
 
     def __init__(self, primitives: Dict[str, 'BasePrimitive']):
         """
@@ -323,6 +325,43 @@ class BaseSkill(ABC):
     def try_execute(self, *args, **kwargs) -> SkillResult:
         """Run check(), then execute() if the check passed. Returns a single SkillResult."""
         pass
+
+    def as_tools(self) -> List:
+        """
+        Generate LangChain StructuredTool wrappers for check / execute / try_execute.
+
+        Each method becomes one tool named "<SkillClassName>.<method_name>".
+        The tool description is taken from the method's __doc__ string.
+        Results are passed through SkillResult.to_llm_message() so the LLM
+        never receives raw Python objects.
+
+        Returns:
+            List of StructuredTool objects, one per method (3 total).
+            Suitable for llm.bind_tools().
+
+        Note:
+            LangChain is imported lazily to avoid making it a hard dependency
+            of base.py for consumers that don't use the LLM layer.
+        """
+        # Lazy imports: keep base.py free of hard LangChain dependency
+        from langchain_core.tools import StructuredTool  # noqa: PLC0415
+
+        skill_name = type(self).__name__
+        tools = []
+        for method_name in ("check", "execute", "try_execute"):
+            method = getattr(self, method_name)  # bound method; self already captured
+
+            @functools.wraps(method)
+            def _wrapper(*args, _m=method, **kwargs):
+                result = _m(*args, **kwargs)
+                return result.to_llm_message() if isinstance(result, SkillResult) else result
+
+            tools.append(StructuredTool.from_function(
+                func=_wrapper,
+                name=f"{skill_name}.{method_name}",
+                description=method.__doc__ or f"{skill_name} {method_name}",
+            ))
+        return tools
 
 
 # ================ @require_robot_active decorator ================
