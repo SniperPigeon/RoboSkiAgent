@@ -10,6 +10,9 @@ Architecture:
 
 from typing import Dict
 from SkiLib.base import BaseSkill, SkillResult, ExecutionPhase
+from SkiLib.log import get_logger
+
+logger = get_logger(__name__)
 
 
 class PickAndPlace(BaseSkill):
@@ -82,27 +85,27 @@ class PickAndPlace(BaseSkill):
         Returns:
             SkillResult — fails fast and returns on first primitive failure.
         """
-        print(f"[PickAndPlace] Moving to pick position...")
+        logger.info("Moving to pick position...")
         result = self.primitives['MoveJ'].execute(target=pick_target)
         if not result.success:
             return result
 
-        print(f"[PickAndPlace] Grasping...")
+        logger.info("Grasping...")
         result = self.primitives['Grasp'].execute(item=pick_target)
         if not result.success:
             return result
 
-        print(f"[PickAndPlace] Moving to place position...")
+        logger.info("Moving to place position...")
         result = self.primitives['MoveJ'].execute(target=place_target)
         if not result.success:
             return result
 
-        print(f"[PickAndPlace] Releasing...")
+        logger.info("Releasing...")
         result = self.primitives['Release'].execute(item=pick_target)
         if not result.success:
             return result
 
-        print(f"[PickAndPlace] Pick and place completed.")
+        logger.info("Pick and place completed.")
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.EXECUTION,
@@ -113,6 +116,6 @@ class PickAndPlace(BaseSkill):
         """Run check(), then execute() if the check passed."""
         result = self.check(pick_target, place_target, approach_height)
         if not result.success:
-            print(f"[PickAndPlace] Pre-flight check failed: {result.message}")
+            logger.warning("Pre-flight check failed: %s", result.message)
             return result
         return self.execute(pick_target, place_target, approach_height)
