@@ -21,10 +21,10 @@ pick_place = skill_registry.get_skill('PickAndPlace')
 if __name__ == "__main__":
     target = context.RDK.Item("App Pick Part A")
     place  = context.RDK.Item("App Place Part A")
-
+    print(pick_place.as_tools())
     # Primitive直接使用
-    result = MoveJ.check(target=target) # type: ignore
-    print(result)
+    
+    #print(result)
 
     # Skill组合使用
-    pick_place.try_execute(target, place)
+    #pick_place.try_execute(target, place)
