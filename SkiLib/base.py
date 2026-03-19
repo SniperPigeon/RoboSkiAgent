@@ -271,6 +271,7 @@ class BasePrimitive(ABC):
 
 # ================ BaseSkill ================
 
+
 class BaseSkill(ABC):
     """
     Base class for high-level robot skills.
@@ -326,9 +327,34 @@ class BaseSkill(ABC):
         """Execute the skill. Must catch all exceptions internally."""
         pass
 
+    def _should_skip_check(self) -> bool:
+        """
+        Return True when RobotContext.debug_skip_check is set.
+
+        Intended for simulation / unit-test environments: subclasses call this at
+        the top of their try_execute() to decide whether to bypass check().
+
+        Pattern for subclass try_execute():
+            if self._should_skip_check():
+                logger.debug("Skipping pre-flight check (debug_skip_check=True)")
+                return self.execute(...)
+            result = self.check(...)
+            if not result.success:
+                return result
+            return self.execute(...)
+        """
+        from SkiLib.robotcontext import RobotContext  # noqa: PLC0415 (lazy import avoids circular dep)
+        ctx = RobotContext.instance()
+        return ctx is not None and bool(ctx.debug_skip_check)
+
     @abstractmethod
     def try_execute(self, *args, **kwargs) -> SkillResult:
-        """Run check(), then execute() if the check passed. Returns a single SkillResult."""
+        """Run check(), then execute() if the check passed. Returns a single SkillResult.
+
+        Subclass implementations must keep concrete type signatures (not *args/**kwargs)
+        so that as_tools() can generate a correct LangChain JSON schema.
+        Call self._should_skip_check() at the top to honour debug_skip_check.
+        """
         pass
 
     def as_tools(self) -> List:
