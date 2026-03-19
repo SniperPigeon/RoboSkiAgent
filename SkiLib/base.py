@@ -294,6 +294,11 @@ class BaseSkill(ABC):
     REQUIRED_PRIMITIVES: List[str] = []
     SKILL_DESCRIPTION:   str       = ""      # Human/LLM-readable description for tool schemas
     SKILL_CATEGORY:      str       = "skill" # Category tag for list_skills(category=) filtering
+    # Methods exposed to the LLM via as_tools().
+    # "execute" is intentionally excluded: the LLM should always go through try_execute
+    # (which validates before moving) or use check() for non-destructive probing.
+    # Subclasses may override to add "execute" only when there is a deliberate reason.
+    TOOL_METHODS:        tuple     = ("check", "try_execute")
 
     def __init__(self, primitives: Dict[str, 'BasePrimitive']):
         """
@@ -328,15 +333,19 @@ class BaseSkill(ABC):
 
     def as_tools(self) -> List:
         """
-        Generate LangChain StructuredTool wrappers for check / execute / try_execute.
+        Generate LangChain StructuredTool wrappers for the methods listed in TOOL_METHODS.
 
         Each method becomes one tool named "<SkillClassName>.<method_name>".
         The tool description is taken from the method's __doc__ string.
         Results are passed through SkillResult.to_llm_message() so the LLM
         never receives raw Python objects.
 
+        By default only "check" and "try_execute" are exposed (see TOOL_METHODS).
+        "execute" is excluded because it bypasses validation; the LLM should always
+        use try_execute for safe execution or check for non-destructive probing.
+
         Returns:
-            List of StructuredTool objects, one per method (3 total).
+            List of StructuredTool objects, one per entry in TOOL_METHODS.
             Suitable for llm.bind_tools().
 
         Note:
@@ -348,7 +357,7 @@ class BaseSkill(ABC):
 
         skill_name = type(self).__name__
         tools = []
-        for method_name in ("check", "execute", "try_execute"):
+        for method_name in self.TOOL_METHODS:
             method = getattr(self, method_name)  # bound method; self already captured
 
             @functools.wraps(method)
