@@ -3,27 +3,70 @@ Pick and Place Skill - Platform-agnostic implementation
 
 Architecture:
 - NO RoboDK imports (platform-agnostic)
+- All symbol IDs (str) resolved to RoboDK Items via RobotContext
 - Dependencies injected via primitives registry
 - Pure composition of primitives
-- Returns SkillResult throughout (CheckResult fully removed)
+- Returns SkillResult throughout
+
+Execution sequence:
+    1. MoveJ/MoveL to pick_approach  (approach_motion, default MoveJ)
+    2. MoveL  to pick_target         (linear precise approach)
+    3. Grasp  item                   (close gripper)
+    4. MoveL  to pick_approach       (linear depart, same as approach)
+    5. MoveJ/MoveL to place_approach (transit_motion, default MoveJ)
+    6. MoveL  to place_target        (linear precise approach)
+    7. Release item                  (open gripper)
+    8. MoveL  to place_approach      (linear depart)
 """
 
-from typing import Dict
+from typing import Dict, Optional, Tuple
 from SkiLib.base import BaseSkill, SkillResult, ExecutionPhase
+from SkiLib.robotcontext import RobotContext
 from SkiLib.log import get_logger
 
 logger = get_logger(__name__)
+
+_VALID_TRANSIT_MOTIONS = ("MoveJ", "MoveL")
+
+
+_CTX_NOT_INITIALIZED = SkillResult(
+    success=False,
+    execution_phase=ExecutionPhase.VALIDATION,
+    error_type="CONTEXT_NOT_INITIALIZED",
+    message="RobotContext has not been initialized. Call RobotContext.initialize() before using skills.",
+)
+
+
+def _resolve(name: str, ctx: RobotContext) -> Tuple[Optional[object], Optional[SkillResult]]:
+    """Resolve a symbol name to a RoboDK Item. Returns (item, None) on success or (None, error) on failure."""
+    obj = ctx.RDK.Item(name)
+    if not obj.Valid():
+        return None, SkillResult(
+            success=False,
+            execution_phase=ExecutionPhase.VALIDATION,
+            error_type="ITEM_NOT_FOUND",
+            message=f"Item '{name}' not found in the RoboDK station.",
+            suggestion="Verify the name matches exactly what is shown in RoboDK's item tree.",
+        )
+    return obj, None
 
 
 class PickAndPlace(BaseSkill):
     """
     High-level pick and place skill.
 
+    All position/item arguments are RoboDK symbol names (strings).
+    Symbols are resolved to RoboDK Items internally via RobotContext.
+
     Sequence (execute):
-        1. MoveJ  to pick_target
-        2. Grasp
-        3. MoveJ  to place_target
-        4. Release
+        1. approach → pick_approach   (approach_motion: MoveJ or MoveL, default MoveJ)
+        2. MoveL  → pick_target       (linear precise approach to grasp point)
+        3. Grasp    item
+        4. MoveL  → pick_approach     (linear depart with workpiece)
+        5. transit  → place_approach  (transit_motion: MoveJ or MoveL, default MoveJ)
+        6. MoveL  → place_target      (linear precise approach to place point)
+        7. Release  item
+        8. MoveL  → place_approach    (linear depart, empty gripper)
     """
 
     SKILL_DESCRIPTION   = "Pick an object from pick_target and place it at place_target."
@@ -33,38 +76,131 @@ class PickAndPlace(BaseSkill):
     def __init__(self, primitives: Dict):
         super().__init__(primitives)
 
-    def check(self, pick_target, place_target, approach_height=100) -> SkillResult:
+    # ------------------------------------------------------------------
+    # check
+    # ------------------------------------------------------------------
+
+    def check(
+        self,
+        item: str,
+        pick_approach: str,
+        pick_target: str,
+        place_approach: str,
+        place_target: str,
+        transit_motion: str = "MoveJ",
+        approach_motion: str = "MoveJ",
+    ) -> SkillResult:
         """
-        Check if pick and place is feasible.
+        Pre-flight feasibility check.
 
         Args:
-            pick_target:     Pick position (robolink.Item or joints).
-            place_target:    Place position.
-            approach_height: Unused — reserved for approach-offset logic.
+            item:            RoboDK name of the workpiece to grasp/release.
+            pick_approach:   Target name for the approach/depart point near pick.
+            pick_target:     Target name for the linear-move precise grasp point.
+            place_approach:  Target name for the transit destination / depart point near place.
+            place_target:    Target name for the linear-move precise place point.
+            transit_motion:  Motion type for the pick_approach→place_approach segment.
+                             Must be "MoveJ" (default) or "MoveL".
+            approach_motion: Motion type for the initial move to pick_approach.
+                             Must be "MoveJ" (default) or "MoveL".
 
         Returns:
             SkillResult — success=False with first failing check on failure.
+
+        Note:
+            All motion checks use the robot's current position as start. Full sequential
+            path simulation is not possible at planning time; this check covers reachability
+            and item validity only.
         """
-        pick_check = self.primitives['MoveJ'].check(target=pick_target)
-        if not pick_check.success:
+        # 1. Validate motion type parameters
+        if approach_motion not in _VALID_TRANSIT_MOTIONS:
             return SkillResult(
                 success=False,
-                execution_phase=ExecutionPhase.PLANNING,
-                error_type=pick_check.error_type,
-                message=f"Cannot reach pick position: {pick_check.message}",
-                suggestion=pick_check.suggestion,
-                data=pick_check.data,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type="INVALID_PARAM",
+                message=f"approach_motion must be 'MoveJ' or 'MoveL', got '{approach_motion}'.",
+            )
+        if transit_motion not in _VALID_TRANSIT_MOTIONS:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type="INVALID_PARAM",
+                message=f"transit_motion must be 'MoveJ' or 'MoveL', got '{transit_motion}'.",
             )
 
-        place_check = self.primitives['MoveJ'].check(target=place_target)
-        if not place_check.success:
+        # 2. Resolve all symbols
+        ctx = RobotContext.instance()
+        if ctx is None:
+            return _CTX_NOT_INITIALIZED
+        item_obj, err = _resolve(item, ctx)
+        if err:
+            return err
+        pick_approach_obj, err = _resolve(pick_approach, ctx)
+        if err:
+            return err
+        pick_target_obj, err = _resolve(pick_target, ctx)
+        if err:
+            return err
+        place_approach_obj, err = _resolve(place_approach, ctx)
+        if err:
+            return err
+        place_target_obj, err = _resolve(place_target, ctx)
+        if err:
+            return err
+
+        # 3. Check pick_approach reachable via approach_motion
+        result = self.primitives[approach_motion].check(target=pick_approach_obj)
+        if not result.success:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.PLANNING,
-                error_type=place_check.error_type,
-                message=f"Cannot reach place position: {place_check.message}",
-                suggestion=place_check.suggestion,
-                data=place_check.data,
+                error_type=result.error_type,
+                message=f"pick_approach '{pick_approach}' not reachable via {approach_motion}: {result.message}",
+                suggestion=result.suggestion,
+            )
+
+        # 4. Check pick_target reachable via MoveL
+        result = self.primitives['MoveL'].check(target=pick_target_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"pick_target '{pick_target}' not reachable via MoveL: {result.message}",
+                suggestion=result.suggestion,
+            )
+
+        # 5. Check Grasp preconditions
+        result = self.primitives['Grasp'].check(item=item_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"Grasp check failed for item '{item}': {result.message}",
+                suggestion=result.suggestion,
+            )
+
+        # 6. Check place_approach reachable via transit_motion
+        result = self.primitives[transit_motion].check(target=place_approach_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"place_approach '{place_approach}' not reachable via {transit_motion}: {result.message}",
+                suggestion=result.suggestion,
+            )
+
+        # 7. Check place_target reachable via MoveL
+        result = self.primitives['MoveL'].check(target=place_target_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"place_target '{place_target}' not reachable via MoveL: {result.message}",
+                suggestion=result.suggestion,
             )
 
         return SkillResult(
@@ -73,49 +209,143 @@ class PickAndPlace(BaseSkill):
             message="Pick and place pre-flight check passed.",
         )
 
-    def execute(self, pick_target, place_target, approach_height=100) -> SkillResult:
+    # ------------------------------------------------------------------
+    # execute
+    # ------------------------------------------------------------------
+
+    def execute(
+        self,
+        item: str,
+        pick_approach: str,
+        pick_target: str,
+        place_approach: str,
+        place_target: str,
+        transit_motion: str = "MoveJ",
+        approach_motion: str = "MoveJ",
+    ) -> SkillResult:
         """
-        Execute pick and place: MoveJ to pick → Grasp → MoveJ to place → Release.
+        Execute pick and place.
 
         Args:
-            pick_target:     Pick position.
-            place_target:    Place position.
-            approach_height: Unused — reserved for future MoveL approach offset.
+            item:            RoboDK name of the workpiece.
+            pick_approach:   Approach/depart point near the pick location.
+            pick_target:     Precise grasp point (MoveL).
+            place_approach:  Approach/depart point near the place location.
+            place_target:    Precise place point (MoveL).
+            transit_motion:  "MoveJ" (default) or "MoveL" for the with-workpiece transit.
+            approach_motion: "MoveJ" (default) or "MoveL" for the initial move to pick_approach.
 
         Returns:
-            SkillResult — fails fast and returns on first primitive failure.
+            SkillResult — fails fast on first primitive failure.
         """
-        logger.info("Moving to pick position...")
-        result = self.primitives['MoveJ'].execute(target=pick_target)
+        # Validate motion parameters first (fast-fail before any motion)
+        if approach_motion not in _VALID_TRANSIT_MOTIONS:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type="INVALID_PARAM",
+                message=f"approach_motion must be 'MoveJ' or 'MoveL', got '{approach_motion}'.",
+            )
+        if transit_motion not in _VALID_TRANSIT_MOTIONS:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type="INVALID_PARAM",
+                message=f"transit_motion must be 'MoveJ' or 'MoveL', got '{transit_motion}'.",
+            )
+
+        # Resolve all symbols up front
+        ctx = RobotContext.instance()
+        if ctx is None:
+            return _CTX_NOT_INITIALIZED
+        item_obj, err = _resolve(item, ctx)
+        if err:
+            return err
+        pick_approach_obj, err = _resolve(pick_approach, ctx)
+        if err:
+            return err
+        pick_target_obj, err = _resolve(pick_target, ctx)
+        if err:
+            return err
+        place_approach_obj, err = _resolve(place_approach, ctx)
+        if err:
+            return err
+        place_target_obj, err = _resolve(place_target, ctx)
+        if err:
+            return err
+
+        # Step 1: move to pick approach point
+        logger.info("Step 1/8: %s to pick_approach '%s'...", approach_motion, pick_approach)
+        result = self.primitives[approach_motion].execute(target=pick_approach_obj)
         if not result.success:
             return result
 
-        logger.info("Grasping...")
-        result = self.primitives['Grasp'].execute(item=pick_target)
+        # Step 2: linear precise approach to pick point
+        logger.info("Step 2/8: MoveL to pick_target '%s'...", pick_target)
+        result = self.primitives['MoveL'].execute(target=pick_target_obj)
         if not result.success:
             return result
 
-        logger.info("Moving to place position...")
-        result = self.primitives['MoveJ'].execute(target=place_target)
+        # Step 3: grasp workpiece
+        logger.info("Step 3/8: Grasp '%s'...", item)
+        result = self.primitives['Grasp'].execute(item=item_obj)
         if not result.success:
             return result
 
-        logger.info("Releasing...")
-        result = self.primitives['Release'].execute(item=pick_target)
+        # Step 4: linear depart (retrace approach with workpiece)
+        logger.info("Step 4/8: MoveL depart to pick_approach '%s'...", pick_approach)
+        result = self.primitives['MoveL'].execute(target=pick_approach_obj)
         if not result.success:
             return result
 
-        logger.info("Pick and place completed.")
+        # Step 5: transit to place approach (with workpiece)
+        logger.info("Step 5/8: %s transit to place_approach '%s'...", transit_motion, place_approach)
+        result = self.primitives[transit_motion].execute(target=place_approach_obj)
+        if not result.success:
+            return result
+
+        # Step 6: linear precise approach to place point
+        logger.info("Step 6/8: MoveL to place_target '%s'...", place_target)
+        result = self.primitives['MoveL'].execute(target=place_target_obj)
+        if not result.success:
+            return result
+
+        # Step 7: release workpiece
+        logger.info("Step 7/8: Release '%s'...", item)
+        result = self.primitives['Release'].execute(item=item_obj)
+        if not result.success:
+            return result
+
+        # Step 8: linear depart (retrace approach, empty gripper)
+        logger.info("Step 8/8: MoveL depart to place_approach '%s'...", place_approach)
+        result = self.primitives['MoveL'].execute(target=place_approach_obj)
+        if not result.success:
+            return result
+
+        logger.info("Pick and place completed: '%s' moved from '%s' to '%s'.", item, pick_target, place_target)
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.EXECUTION,
-            message="Pick and place completed successfully.",
+            message=f"Pick and place completed: '{item}' moved from '{pick_target}' to '{place_target}'.",
         )
 
-    def try_execute(self, pick_target, place_target, approach_height=100) -> SkillResult:
+    # ------------------------------------------------------------------
+    # try_execute
+    # ------------------------------------------------------------------
+
+    def try_execute(
+        self,
+        item: str,
+        pick_approach: str,
+        pick_target: str,
+        place_approach: str,
+        place_target: str,
+        transit_motion: str = "MoveJ",
+        approach_motion: str = "MoveJ",
+    ) -> SkillResult:
         """Run check(), then execute() if the check passed."""
-        result = self.check(pick_target, place_target, approach_height)
+        result = self.check(item, pick_approach, pick_target, place_approach, place_target, transit_motion, approach_motion)
         if not result.success:
             logger.warning("Pre-flight check failed: %s", result.message)
             return result
-        return self.execute(pick_target, place_target, approach_height)
+        return self.execute(item, pick_approach, pick_target, place_approach, place_target, transit_motion, approach_motion)
