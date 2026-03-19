@@ -343,7 +343,25 @@ class PickAndPlace(BaseSkill):
         transit_motion: str = "MoveJ",
         approach_motion: str = "MoveJ",
     ) -> SkillResult:
-        """Run check(), then execute() if the check passed."""
+        """Run pre-flight check, then execute pick-and-place if the check passed.
+
+        Args:
+            item:            RoboDK name of the workpiece to grasp/release.
+            pick_approach:   Target name for the approach/depart point near pick.
+            pick_target:     Target name for the linear-move precise grasp point.
+            place_approach:  Target name for the transit destination / depart point near place.
+            place_target:    Target name for the linear-move precise place point.
+            transit_motion:  Motion type for the pick_approach→place_approach segment.
+                             Must be "MoveJ" (default) or "MoveL".
+            approach_motion: Motion type for the initial move to pick_approach.
+                             Must be "MoveJ" (default) or "MoveL".
+
+        Returns:
+            SkillResult — the check result on pre-flight failure, otherwise the execute result.
+        """
+        if self._should_skip_check():
+            logger.debug("Skipping pre-flight check (debug_skip_check=True)")
+            return self.execute(item, pick_approach, pick_target, place_approach, place_target, transit_motion, approach_motion)
         result = self.check(item, pick_approach, pick_target, place_approach, place_target, transit_motion, approach_motion)
         if not result.success:
             logger.warning("Pre-flight check failed: %s", result.message)
