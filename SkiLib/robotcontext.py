@@ -60,6 +60,11 @@ class RobotContext:
         # Safety flag: set True by Context Flush on failure; cleared on resume
         self.halt_flag: bool = False
 
+        # Debug flag: when True, BaseSkill._should_skip_check() returns True so
+        # try_execute() calls execute() directly without running check().
+        # For simulation / unit-test environments only — never set True in production.
+        self.debug_skip_check: bool = False
+
         # Auto-initialize primitive registry
         self.primitive_registry = PrimitiveRegistry(self.robot, self.RDK)
 
