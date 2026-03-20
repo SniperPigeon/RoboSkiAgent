@@ -171,7 +171,7 @@ class PickAndPlace(BaseSkill):
             )
 
         # 5. Check Grasp preconditions
-        result = self.primitives['Grasp'].check(item=item_obj)
+        result = self.primitives['Grasp'].check(expected_item=item_obj)
         if not result.success:
             return SkillResult(
                 success=False,
@@ -288,7 +288,7 @@ class PickAndPlace(BaseSkill):
 
         # Step 3: grasp workpiece
         logger.info("Step 3/8: Grasp '%s'...", item)
-        result = self.primitives['Grasp'].execute(item=item_obj)
+        result = self.primitives['Grasp'].execute(expected_item=item_obj)
         if not result.success:
             return result
 
@@ -312,7 +312,7 @@ class PickAndPlace(BaseSkill):
 
         # Step 7: release workpiece
         logger.info("Step 7/8: Release '%s'...", item)
-        result = self.primitives['Release'].execute(item=item_obj)
+        result = self.primitives['Release'].execute(expected_item=item_obj)
         if not result.success:
             return result
 
