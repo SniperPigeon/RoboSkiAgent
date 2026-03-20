@@ -110,22 +110,11 @@ def dispatcher(state: GlobalState) -> dict:
     """
     Dispatcher Node (Pure Code, No LLM)
 
-    Role: Fill the execution slot — pop todo_list[0] into current_task ONLY when slot is empty.
-          If current_task is already set (e.g. retained after failure), do nothing.
+    Role: Pop todo_list[0] into current_task.
+          For auto tasks, after_dispatcher routes to executor.
+          For manual tasks, sets halt_flag/halt_reason so after_dispatcher routes to human_intervention.
     Rule: 100% deterministic; must never invoke any LLM.
-
-    For manual tasks (type="manual") the slot is filled AND halt_flag/halt_reason are set
-    so that after_dispatcher routes them directly to human_intervention, bypassing Executor.
-
-    State transitions for `current_task` slot:
-    - {} → {...}  : Slot is empty, pop next task from todo_list
-    - {...} → {...}: Slot occupied (task in-flight or retained after failure), skip
     """
-    if state.get("current_task"):
-        # Slot occupied — task in flight or retained after failure; do not overwrite
-        print(f"[dispatcher] Slot occupied: {state['current_task'].get('task_id')} — skipping pop.")
-        return {}
-
     todo = list(state.get("todo_list", []))
     if not todo:
         print("[dispatcher] todo_list empty — nothing to dispatch.")
@@ -143,6 +132,72 @@ def dispatcher(state: GlobalState) -> dict:
         print(f"[dispatcher] Manual task detected — flagging HILP (MANUAL_TASK).")
 
     return result
+
+
+def after_dispatcher(state: GlobalState) -> str:
+    """
+    Conditional edge out of dispatcher.
+
+    - manual task: halt_flag was set by dispatcher → route to human_intervention
+    - auto task  : no halt_flag → route to executor
+    """
+    if state.get("halt_flag"):
+        return "human_intervention"
+    return "executor"
+
+
+def human_intervention(state: GlobalState) -> dict:
+    """
+    Human Intervention Node (LangGraph interrupt)
+
+    Entry points:
+    - halt_reason="MANUAL_TASK"  : planned manual step, operator chooses complete / abort
+    - halt_reason="TASK_FAILURE" : executor gave up,    operator chooses retry / abort
+
+    Writes _hi_action for after_human_intervention to route on.
+    Clears halt_flag / halt_reason regardless of chosen action.
+
+    TODO: Replace stub auto-action with real LangGraph interrupt() call.
+    """
+    reason  = state.get("halt_reason", "UNKNOWN")
+    task_id = state.get("current_task", {}).get("task_id", "?")
+    print(f"[human_intervention] HALTED — reason={reason}, task={task_id}")
+
+    # STUB: auto-pick action for smoke testing
+    action = "complete" if reason == "MANUAL_TASK" else "abort"
+    print(f"[human_intervention] Auto-action (stub): {action}")
+
+    # MANUAL_TASK + retry is illegal — executor has no skill to run, causes infinite HILP loop
+    if action == "retry" and reason == "MANUAL_TASK":
+        print("[human_intervention] retry on MANUAL_TASK is illegal — degrading to abort.")
+        action = "abort"
+
+    updates: dict = {
+        "_hi_action":  action,
+        "halt_flag":   False,
+        "halt_reason": None,
+    }
+    if action in ("complete", "abort"):
+        updates["current_task"] = {}
+    if action == "abort":
+        updates["todo_list"] = []
+    return updates
+
+
+def after_human_intervention(state: GlobalState) -> str:
+    """
+    Conditional edge out of human_intervention.
+
+    - retry    → executor    (same current_task, halt cleared)
+    - complete → dispatcher  (slot cleared, advance to next task)
+    - abort    → END         (queue wiped)
+    """
+    action = state.get("_hi_action")
+    if action == "retry":
+        return "executor"
+    if action == "complete":
+        return "dispatcher"
+    return END
 
 
 def executor(state: GlobalState) -> dict:
@@ -201,7 +256,8 @@ def context_flush(state: GlobalState) -> dict:
         error_type = last_result.get("error_type", "UNKNOWN")
         print(f"[context_flush] {task_id} FAILED ({error_type}) — setting halt_flag, retaining task.")
         return {
-            "halt_flag": True,            # Trigger HILP
+            "halt_flag":   True,
+            "halt_reason": "TASK_FAILURE",
             "execution_log": [f"[context_flush] {task_id} → HALTED ({error_type})"]
             # current_task and todo_list are NOT modified — task will be retried on resume
         }
@@ -214,11 +270,11 @@ def context_flush(state: GlobalState) -> dict:
 def should_continue(state: GlobalState) -> str:
     """
     Routing condition after context_flush.
-    
+
     Priority (high to low):
-    1. halt_flag=True      → "halt" → END (HILP triggered; await human intervention)
+    1. halt_flag=True      → "halt"     → human_intervention
     2. todo_list non-empty → "continue" → dispatcher (fetch next task)
-    3. Otherwise           → "done" → END (queue empty, normal completion)
+    3. Otherwise           → "done"     → END (queue empty, normal completion)
     """
     if state.get("halt_flag"):
         return "halt"
@@ -235,21 +291,25 @@ def create_graph():
         Compiled LangGraph application ready for invocation or LangGraph Studio.
     
     Flow:
-        START → supervisor → planner → [dispatcher → executor → context_flush] × N → END
-    
-    Conditional routing after context_flush:
-    - halt_flag=True      → halt → END
-    - todo_list non-empty → continue → dispatcher
-    - otherwise           → done → END
+        START → supervisor → planner → dispatcher
+                                            ├─(auto)──→ executor → context_flush
+                                            │                           ├─(continue)→ dispatcher
+                                            │                           ├─(halt)────→ human_intervention
+                                            │                           └─(done)────→ END
+                                            └─(manual)─→ human_intervention
+                                                              ├─(retry)────→ executor
+                                                              ├─(complete)─→ dispatcher
+                                                              └─(abort)────→ END
     """
     builder = StateGraph(GlobalState)
 
     # Register nodes
-    builder.add_node("supervisor",    supervisor)
-    builder.add_node("planner",       planner)
-    builder.add_node("dispatcher",    dispatcher)
-    builder.add_node("executor",      executor)
-    builder.add_node("context_flush", context_flush)
+    builder.add_node("supervisor",          supervisor)
+    builder.add_node("planner",             planner)
+    builder.add_node("dispatcher",          dispatcher)
+    builder.add_node("executor",            executor)
+    builder.add_node("context_flush",       context_flush)
+    builder.add_node("human_intervention",  human_intervention)
 
     # Layer-1: linear planning flow
     builder.add_edge(START,        "supervisor")
@@ -257,15 +317,31 @@ def create_graph():
     builder.add_edge("planner",    "dispatcher")
 
     # Layer-2: execution loop
-    builder.add_edge("dispatcher",   "executor")
-    builder.add_edge("executor",     "context_flush")
+    builder.add_conditional_edges(
+        "dispatcher",
+        after_dispatcher,
+        {
+            "executor":           "executor",           # auto task
+            "human_intervention": "human_intervention", # manual task
+        },
+    )
+    builder.add_edge("executor", "context_flush")
     builder.add_conditional_edges(
         "context_flush",
         should_continue,
         {
-            "continue": "dispatcher",  # slot cleared — fetch next task
-            "done":     END,           # queue empty — all done
-            "halt":     END,           # halt_flag set — await human intervention
+            "continue": "dispatcher",          # slot cleared — fetch next task
+            "done":     END,                   # queue empty — all done
+            "halt":     "human_intervention",  # task failure — await operator
+        },
+    )
+    builder.add_conditional_edges(
+        "human_intervention",
+        after_human_intervention,
+        {
+            "executor":   "executor",   # retry same task
+            "dispatcher": "dispatcher", # complete → advance to next
+            END:          END,          # abort → terminate
         },
     )
 
