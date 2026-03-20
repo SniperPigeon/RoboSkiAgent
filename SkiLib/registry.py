@@ -149,7 +149,7 @@ class SkillRegistry:
     def get_tools(self) -> list:
         """
         Return a flat list of LangChain StructuredTool objects covering all
-        registered skills' check / execute / try_execute methods.
+        registered skills' check / try_execute (exclude execute, defined in BaseSkill) methods.
         Suitable for llm.bind_tools().
         """
         tools = []
