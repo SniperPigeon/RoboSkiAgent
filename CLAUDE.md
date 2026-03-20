@@ -45,29 +45,31 @@
 ```
 RoboSkiAgent/
 ├── CLAUDE.md
+├── IMPLEMENTATION_CHECKLIST.md
 ├── Agent/                          # 实验用 Notebook，不含生产代码
 │   ├── langchain_rag.ipynb
 │   └── LangGraph.ipynb
 └── SkiLib/                         # 核心库
     ├── ARCHITECTURE.md
     ├── __init__.py
-    ├── base.py                     # 核心抽象：BasePrimitive / BaseSkill / SkillResult
+    ├── base.py                     # 核心抽象：BasePrimitive / BaseSkill / SkillResult / as_tools() / TOOL_METHODS
     ├── robotcontext.py             # 运行时单例：RobotContext / PrimitiveRegistry
-    ├── main.py
+    ├── registry.py                 # SkillRegistry 单例：反射扫描 skills/，实例化 BaseSkill，暴露 get_tools()
+    ├── log.py                      # Logger 工厂：get_logger(__name__)，双 Handler（控制台 + 轮转文件）
+    ├── graph.py                    # LangGraph 状态机（stub 阶段，待 Phase 3 重写）
+    ├── main.py                     # 调试入口（非生产）
     ├── RDK_Test.py
     ├── utils.py
     ├── doc/
     │   ├── DEV_NOTES_SkillRegistry.md
     │   ├── IK_SOLVER_USAGE.md
     │   └── IMPLEMENTATION_PLAN_SkillRegistry.md
-    ├── examples/
-    ├── log.py                      # Logger 工厂：get_logger(__name__)，双 Handler（控制台 + 轮转文件）
-    ├── registry.py                 # SkillRegistry 单例：反射扫描 skills/，实例化 BaseSkill，暴露 get_tools()
     ├── primitives/
-    │   ├── motion.py               # MoveJ (完整) / MoveL (完整)
-    │   └── gripper.py              # Grasp (完整，仿真) / Release (完整，仿真)
+    │   ├── motion.py               # MoveJ (完整) / MoveL (完整，含 check())
+    │   └── gripper.py              # Grasp (完整，仿真) / Release (完整，仿真)；参数 expected_item
     └── skills/
-        └── pick_and_place.py
+        ├── pick_and_place.py       # PickAndPlace (完整)：8步序列，显式接近点，approach_motion/transit_motion
+        └── dummy_skills.py         # 测试桩（非生产）
 ```
 
 **Agent/ 与 SkiLib/ 的关系**：Agent Notebook 通过导入 SkiLib 调用技能库，本身不包含任何业务逻辑实现。
