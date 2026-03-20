@@ -1,7 +1,7 @@
 # RoboSkiAgent 实现 Checklist
 
 > 按依赖顺序排列。每阶段完成后再进入下一阶段。
-> 最后更新：2026-03-20
+> 最后更新：2026-03-20（graph.py 路由重构）
 
 ---
 
@@ -142,31 +142,29 @@
   - 终止条件：无 tool_call（知识饱和）或调用了 `request_human_intervention`
   - 调用 `request_human_intervention` 后：**触发 `interrupt("human_intervention")`** 真正暂停图
 
-- [ ] **3.5** 新建/重写 `graph.py` — **`human_intervention` 节点**
-  - 在图中增加此节点，接收两类入口：
+- [x] **3.5** `graph.py` — **`human_intervention` stub 节点** *(2026-03-20，stub)*
+  - ~~新建~~ 已加入图；接收两类入口：
     - `context_flush` → `halt`（`halt_reason="TASK_FAILURE"`）
-    - `dispatcher` → `manual`（`halt_reason="MANUAL_TASK"`）
-  - 节点内调用 `interrupt({"halt_reason": ..., "current_task": ..., "todo_list": ...})`
-  - Resume 时通过 `Command(resume={"action": "retry"|"complete"|"abort"})` 恢复
-  - `action=retry`：清除 `halt_flag/halt_reason`，保留 `current_task`（Executor 重试）
-    - ❌ 对 `MANUAL_TASK` 非法，节点内强制降级为 `abort`
-  - `action=complete`：清除 `halt_flag/halt_reason`，清空 `current_task`（继续队列）
-    - 仅在 `halt_reason="MANUAL_TASK"` 时语义正确
-  - `action=abort`：清空 `current_task + todo_list`，清除 `halt_flag/halt_reason`
+    - `after_dispatcher` → `manual`（`halt_reason="MANUAL_TASK"`）
+  - **stub 自动行为**：`MANUAL_TASK` → `complete`；`TASK_FAILURE` → `abort`
+  - `retry` 对 `MANUAL_TASK` 非法，节点内强制降级为 `abort`（已实现）
+  - **待实现（Phase 3.5 真实版）**：节点内调用 `interrupt({...})`，通过 `Command(resume={"action": ...})` 恢复
 
-- [ ] **3.5.1** `graph.py` — **Dispatcher 条件路由**
-  - 将 `dispatcher → executor` 静态边改为 `after_dispatcher` 条件函数
-  - `type="auto"` → `executor`；`type="manual"` → `human_intervention`；空槽+空队列 → `END`
-  - Dispatcher 节点本体：填入 manual 任务时同时设 `halt_flag=True`、`halt_reason="MANUAL_TASK"`
+- [x] **3.5.1** `graph.py` — **Dispatcher 条件路由** *(2026-03-20)*
+  - `dispatcher → executor` 静态边已改为 `after_dispatcher` 条件函数
+  - `halt_flag=False` → `executor`（auto 任务）；`halt_flag=True` → `human_intervention`（manual 任务）
+  - Dispatcher 填入 manual 任务时同时设 `halt_flag=True`、`halt_reason="MANUAL_TASK"`
+  - `should_continue` 的 `halt` 路径已从 `END` 改路由到 `human_intervention`
+  - `context_flush` 失败路径补充 `halt_reason="TASK_FAILURE"`
 
 - [ ] **3.5.2** `SkiLib/base.py` — **SkillResult.needs_hilp 字段**
   - 新增 `needs_hilp: bool = True`（已完成，见 base.py）
   - `to_llm_message()` 在 `success=False` 时输出 `needs_hilp`（已完成）
   - Phase 3 Executor ReAct 实现时：只有最终放弃时才退出节点，退出时 `needs_hilp=True`
 
-- [ ] **3.5.3** `graph.py` — **GlobalState 新字段**
-  - `halt_reason: Optional[str]`（"TASK_FAILURE" | "MANUAL_TASK" | None）
-  - `_hi_action: Optional[str]`（内部路由，human_intervention → after_human_intervention）
+- [x] **3.5.3** `graph.py` — **GlobalState 新字段** *(2026-03-20)*
+  - `halt_reason: Optional[str]`（"TASK_FAILURE" | "MANUAL_TASK" | None）✅
+  - `_hi_action: Optional[str]`（内部路由，human_intervention → after_human_intervention）✅
 
 - [ ] **3.5.4** `SkiLib/schemas.py` — **TaskItem 支持 manual 任务**
   - `type: Literal["auto", "manual"] = "auto"`
@@ -275,7 +273,7 @@
 | `SkiLib/skills/task_skills.py` | ❌ 待建 | 1.2 |
 | `SkiLib/specs/example_assembly.yaml` | ❌ 待建 | 1.3 |
 | `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
-| `SkiLib/graph.py` | ⚠️ stub，待重写 | 3.2–3.5 |
+| `SkiLib/graph.py` | ⚠️ stub；路由重构完成（3.5.1/3.5.3 ✅）；LLM 节点待重写（3.2–3.4/3.5 真实版） | 3.2–3.5 |
 | `SkiLib/main.py` | ⚠️ 调试用，待重写 | 3.6 |
 
 ---
