@@ -1,7 +1,7 @@
 # RoboSkiAgent 实现 Checklist
 
 > 按依赖顺序排列。每阶段完成后再进入下一阶段。
-> 最后更新：2026-03-13
+> 最后更新：2026-03-20
 
 ---
 
@@ -33,6 +33,27 @@
 
 ---
 
+## Phase 0.5 · 设计决策记录（已落地，无对应 Phase）
+
+- [x] **D1** `BaseSkill.TOOL_METHODS = ("check", "try_execute")` *(2026-03-20)*
+  - `execute` 从 LLM 工具列表中移除：跳过校验的调用路径不应暴露给 LLM
+  - `check` 保留：LLM 可做"看而不动"的可行性探测
+  - `try_execute` 是 LLM 的正常执行路径（内置安全校验）
+  - 子类可通过覆盖 `TOOL_METHODS` 调整（如需暴露 `execute` 的特殊场景）
+
+- [x] **D2** `Grasp`/`Release` 参数 `item` → `expected_item` *(2026-03-20)*
+  - 夹爪无感知能力：`AttachClosest()` 基于距离，`DetachAll()` 释放全部
+  - `expected_item` 仅用于预检有效性和溯源日志，不影响实际夹取对象
+  - `Grasp.execute()` 新增 `intended/attached` 差异日志，便于调试站点配置错误
+
+- [x] **D3** `PickAndPlace` 接近点改为显式参数 *(2026-03-20)*
+  - 原规划（2.3）：接近点由 `GetApproachTarget` 按命名约定 `"Approach_<target>"` 自动查找
+  - 实际实现：`pick_approach` / `place_approach` 作为显式字符串参数传入
+  - **理由**：LLM 应明确指定所有目标符号；隐式约定对 LLM 不透明且增加不必要的 primitive 依赖
+  - 命名约定（`Approach_*`）保留为 RoboDK 站点规范建议，但不在代码层强制
+
+---
+
 ## Phase 1 · RoboDK 场景查询层
 *Supervisor 消歧义的数据来源；Agent 层所有"符号"从这里取*
 
@@ -61,27 +82,32 @@
 ## Phase 2 · 夹爪原语 + PickAndPlace 重写
 *Motion primitives 补全；PickAndPlace 与 RoboDK 树约定对齐*
 
-- [ ] **2.1** 补全 `SkiLib/primitives/motion.py` 中的 `MoveL.check()`
+- [x] **2.1** 补全 `SkiLib/primitives/motion.py` 中的 `MoveL.check()` *(2026-03-13)*
   - 参考 `MoveJ.check()` 实现；调用 `robot.MoveL_Test(current_joints, target_pose)`
   - 返回值：0=成功，-1=无法线性，-2=目标不可达，>0=碰撞数
   - 移除 `@require_robot_active(bypass_halt=False)` 冗余参数，改为无参数形式
 
 - [x] **2.2** 新建 `SkiLib/primitives/gripper.py` *(2026-03-17)*
-  - `Grasp(item: robolink.Item, tool: Optional[Item] = None) -> SkillResult`
+  - `Grasp(expected_item: robolink.Item, tool: Optional[Item] = None) -> SkillResult`
     - 仿真：`tool.AttachClosest()`；真机：TODO `setDO` + 反馈等待
-  - `Release(item: robolink.Item, tool: Optional[Item] = None) -> SkillResult`
+    - **参数命名**：`item` → `expected_item`（2026-03-20）：夹爪无法选择目标，`expected_item` 仅用于预检和溯源日志，不决定抓哪个
+    - `execute()` 新增溯源日志：`intended='X', attached='Y'`，暴露预期与实际附着的差异
+  - `Release(expected_item: robolink.Item, tool: Optional[Item] = None) -> SkillResult`
     - 仿真：`tool.DetachAll(station)`（物理语义：夹爪开→释放全部）；真机：TODO `setDO`
   - 两个原语均使用 `@require_robot_active` 保护
   - `execution_phase = ExecutionPhase.EXECUTION`（复用现有枚举，不新增 phase）
-  - **技术债务**：`robotcontext.py:141,150,167` 三处 `print()` 待 Phase 5.3 统一迁移
+  - **技术债务**：`robotcontext.py` 三处 `print()` 待 Phase 5.5 统一迁移
 
-- [ ] **2.3** 重写 `SkiLib/skills/pick_and_place.py`
-  - **移除 `approach_height` 参数**；接近点从 RoboDK 树中按命名约定取（`GetApproachTarget`）
-  - **执行序列**（pick 侧）：`MoveJ(approach_pick)` → `MoveL(pick_target)` → `Grasp` → `MoveL(approach_pick)`
-  - **执行序列**（place 侧）：`MoveJ(approach_place)` → `MoveL(place_target)` → `Release` → `MoveL(approach_place)`
-  - `REQUIRED_PRIMITIVES = ['MoveJ', 'MoveL', 'Grasp', 'Release', 'GetApproachTarget']`
-  - `execute()` 和 `check()` 均返回 `SkillResult`（迁移掉 `CheckResult`）
-  - `check()` 验证：pick/place 目标存在、接近点存在、均可达
+- [x] **2.3** 重写 `SkiLib/skills/pick_and_place.py` *(2026-03-20)*
+  - **实现方案与原规划不同**：接近点改为显式参数（`pick_approach`、`place_approach`），不采用命名约定自动查找（`GetApproachTarget`）
+    - **理由**：LLM 作为调用方应明确指定所有目标，隐式命名约定对 LLM 不透明，且增加对 Phase 1 `scene_query` 的不必要依赖
+    - `REQUIRED_PRIMITIVES = ['MoveJ', 'MoveL', 'Grasp', 'Release']`（无需 `GetApproachTarget`）
+  - **执行序列**（8步）：`approach_motion→pick_approach` → `MoveL→pick_target` → `Grasp` → `MoveL→pick_approach` → `transit_motion→place_approach` → `MoveL→place_target` → `Release` → `MoveL→place_approach`
+  - **新增参数** `transit_motion: str = "MoveJ"`：控制携工件过渡段（`pick_approach→place_approach`）的运动类型
+  - **新增参数** `approach_motion: str = "MoveJ"`：控制初始进入接近点（`→pick_approach`）的运动类型
+  - `execute()` / `check()` / `try_execute()` 均返回 `SkillResult`，无 `CheckResult` 使用
+  - `check()` 验证：所有目标存在性（symbol resolve）+ 各段运动可达性（调用 primitive.check()）
+  - `try_execute()` 支持 `_should_skip_check()` bypass（调试用）
 
 ---
 
@@ -195,7 +221,7 @@
   - 日志级别通过环境变量 `ROBOSKI_LOG_LEVEL`（默认 `INFO`）控制，无需改代码切换
   - 首次 import `SkiLib` 时自动完成根 logger 配置（放入 `SkiLib/__init__.py`）
 
-- [ ] **5.2** `SkiLib/graph.py` 迁移
+- [ ] **5.2** `SkiLib/graph.py` 迁移（stub 阶段大量 `print()`，待 Phase 3 重写时一并完成）
   - 模块顶部：`logger = get_logger("graph")`
   - 各节点 `print()` → `logger.info()` / `logger.debug()` / `logger.warning()`
   - 级别约定：
@@ -204,17 +230,21 @@
     - `WARNING`：保守 fallthrough（`needs_hilp=False + success=False`）、manual 任务 retry 降级
     - `ERROR`：Planner retry 耗尽、未知 skill
 
-- [ ] **5.3** `SkiLib/primitives/` 迁移
-  - 各 primitive 模块顶部：`logger = get_logger("primitives.<module_name>")`
-  - `execute()` 和 `check()` 中的 `print()` → `logger.debug()`
-  - 异常捕获处：`logger.error(..., exc_info=True)` 保留 traceback（不上抛）
+- [x] **5.3** `SkiLib/primitives/` 迁移 *(2026-03-20)*
+  - `gripper.py`：已完成，`get_logger(__name__)` + 全部 `logger.*` 调用
+  - `motion.py`：无 `print()` 残留，暂无 logger 调用（纯计算分支，后续按需补充）
 
-- [ ] **5.4** `SkiLib/skills/` 迁移
-  - 同 5.3，logger 命名空间：`"skills.<module_name>"`
+- [x] **5.4** `SkiLib/skills/` 迁移 *(2026-03-20)*
+  - `pick_and_place.py`：已完成，`get_logger(__name__)` + 8 步执行日志均用 `logger.info()`
+  - `dummy_skills.py`：测试桩文件，保留 `print()`（非生产代码）
 
 - [ ] **5.5** `SkiLib/robotcontext.py` 迁移
+  - 三处 `print()` 待迁移（`PrimitiveRegistry` 扫描/注册日志）
   - RoboDK 连接成功/失败：`logger.info()` / `logger.error()`
-  - Registry 扫描结果：`logger.debug()`
+
+- [ ] **5.5.1** `SkiLib/utils.py` 迁移
+  - 三处 `print()` 在异常捕获块内（IK solving、singularity check、manipulability）
+  - 改为 `logger.error(..., exc_info=True)`
 
 - [ ] **5.6** Notebook (`Agent/LangGraph.ipynb`) 迁移
   - 保留 `logging.basicConfig(level=logging.INFO)` 初始化 cell
@@ -231,19 +261,22 @@
 
 | 文件 | 状态 | Phase |
 |------|------|-------|
-| `SkiLib/registry.py` | 待建 | 0.1 |
-| `SkiLib/decorators.py` | 待建 | 0.2 |
-| `SkiLib/__init__.py` | 待更新 | 0.3 |
-| `SkiLib/robotcontext.py` | 待更新 | 0.4 |
-| `SkiLib/primitives/scene_query.py` | 待建 | 1.1 |
-| `SkiLib/skills/task_skills.py` | 待建 | 1.2 |
-| `SkiLib/specs/example_assembly.yaml` | 待建 | 1.3 |
-| `SkiLib/primitives/motion.py` | 待更新 | 2.1 |
-| `SkiLib/primitives/gripper.py` | 待建 | 2.2 |
-| `SkiLib/skills/pick_and_place.py` | 待重写 | 2.3 |
-| `SkiLib/schemas.py` | 待建 | 3.1 |
-| `SkiLib/graph.py` | 待重写 | 3.2–3.5 |
-| `SkiLib/main.py` | 待重写 | 3.6 |
+| `SkiLib/log.py` | ✅ 完成 | 5.1 |
+| `SkiLib/registry.py` | ✅ 完成 | 0.1 |
+| `SkiLib/decorators.py` | ✅ 不建（见 0.2 决策） | 0.2 |
+| `SkiLib/__init__.py` | ✅ 完成 | 0.3 |
+| `SkiLib/robotcontext.py` | ⚠️ 完成，3处 print() 待迁移 | 0.4 / 5.5 |
+| `SkiLib/base.py` | ✅ 完成（SkillResult, TOOL_METHODS, as_tools(), require_robot_active） | — |
+| `SkiLib/primitives/motion.py` | ✅ 完成（MoveJ + MoveL，含 check()） | 2.1 |
+| `SkiLib/primitives/gripper.py` | ✅ 完成（Grasp + Release，expected_item） | 2.2 |
+| `SkiLib/skills/pick_and_place.py` | ✅ 完成（8步序列，显式接近点参数） | 2.3 |
+| `SkiLib/utils.py` | ⚠️ 有 print()，待迁移 | 5.5.1 |
+| `SkiLib/primitives/scene_query.py` | ❌ 待建 | 1.1 |
+| `SkiLib/skills/task_skills.py` | ❌ 待建 | 1.2 |
+| `SkiLib/specs/example_assembly.yaml` | ❌ 待建 | 1.3 |
+| `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
+| `SkiLib/graph.py` | ⚠️ stub，待重写 | 3.2–3.5 |
+| `SkiLib/main.py` | ⚠️ 调试用，待重写 | 3.6 |
 
 ---
 
