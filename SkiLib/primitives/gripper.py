@@ -81,8 +81,10 @@ class Grasp(BasePrimitive):
     Real robot extension points are marked with TODO comments inside execute().
 
     Args:
-        item: The RoboDK Item of the part to grasp (used for pre-flight validity
-              check and logged after attachment for traceability).
+        expected_item: The RoboDK Item of the part intended to be grasped.
+                       Used for pre-flight validity check and traceability logging only.
+                       The actual attachment is determined by proximity (AttachClosest),
+                       not by this reference — the gripper cannot select a specific part.
         tool: The RoboDK tool Item to use.  None = use the currently active tool.
     """
 
@@ -91,11 +93,11 @@ class Grasp(BasePrimitive):
 
     def check(
         self,
-        item: robolink.Item,
+        expected_item: robolink.Item,
         tool: Optional[robolink.Item] = None,
     ) -> SkillResult:
-        # 1. Verify the target item is a valid reference
-        if not item.Valid():
+        # 1. Verify the intended item is a valid reference in the station
+        if not expected_item.Valid():
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.PLANNING,
@@ -112,13 +114,13 @@ class Grasp(BasePrimitive):
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
-            message=f"Grasp check passed: item '{item.Name()}' is valid and tool is available.",
+            message=f"Grasp check passed: item '{expected_item.Name()}' is valid and tool is available.",
         )
 
     @require_robot_active
     def execute(
         self,
-        item: robolink.Item,
+        expected_item: robolink.Item,
         tool: Optional[robolink.Item] = None,
     ) -> SkillResult:
         try:
@@ -153,14 +155,20 @@ class Grasp(BasePrimitive):
                     suggestion="Ensure MoveL to the pick target completed successfully before calling Grasp.",
                 )
 
-            logger.info("Grasp: attached '%s' to tool '%s'.", attached.Name(), tool_item.Name())
+            # Traceability: log intended vs actually attached.
+            # In real robot operation, the gripper has no awareness of which part was
+            # grasped — correctness relies entirely on accurate positioning via MoveL.
+            logger.info(
+                "Grasp: intended='%s', attached='%s' via tool '%s'.",
+                expected_item.Name(), attached.Name(), tool_item.Name(),
+            )
             state = _snapshot_with_gripper(self.robot, gripper_state="CLOSED")
             return SkillResult(
                 success=True,
                 execution_phase=ExecutionPhase.EXECUTION,
                 robot_state=state,
                 message=f"Grasped '{attached.Name()}' successfully.",
-                data={"item_name": attached.Name(), "tool_name": tool_item.Name()},
+                data={"intended_item": expected_item.Name(), "attached_item": attached.Name(), "tool_name": tool_item.Name()},
             )
 
         except Exception as e:
@@ -176,13 +184,13 @@ class Grasp(BasePrimitive):
 
     def try_execute(
         self,
-        item: robolink.Item,
+        expected_item: robolink.Item,
         tool: Optional[robolink.Item] = None,
     ) -> SkillResult:
-        check = self.check(item, tool)
+        check = self.check(expected_item, tool)
         if not check.success:
             return check
-        return self.execute(item, tool)
+        return self.execute(expected_item, tool)
 
 
 class Release(BasePrimitive):
@@ -201,9 +209,10 @@ class Release(BasePrimitive):
     Real robot extension points are marked with TODO comments inside execute().
 
     Args:
-        item: The RoboDK Item of the part expected to be released (used for
-              pre-flight validity check and logged for traceability only; the
-              actual release always detaches all attached objects).
+        expected_item: The RoboDK Item of the part intended to be released.
+                       Used for pre-flight validity check and traceability logging only.
+                       The actual release always detaches all objects attached to the tool —
+                       a real gripper opens its jaws and cannot selectively retain parts.
         tool: The RoboDK tool Item to use.  None = use the currently active tool.
     """
 
@@ -212,11 +221,11 @@ class Release(BasePrimitive):
 
     def check(
         self,
-        item: robolink.Item,
+        expected_item: robolink.Item,
         tool: Optional[robolink.Item] = None,
     ) -> SkillResult:
-        # 1. Verify the target item is a valid reference
-        if not item.Valid():
+        # 1. Verify the intended item is a valid reference in the station
+        if not expected_item.Valid():
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.PLANNING,
@@ -229,12 +238,12 @@ class Release(BasePrimitive):
         # Warning-only because check() is typically called during planning, before
         # Grasp has executed.  Blocking here would prevent pre-flight validation of
         # a full pick-and-place sequence.
-        parent = item.Parent()
+        parent = expected_item.Parent()
         if parent.Valid() and parent.Type() != ITEM_TYPE_TOOL:
             logger.warning(
                 "Release.check: item '%s' parent is '%s' (type %d), not a tool. "
                 "Expected if check() runs before Grasp; otherwise verify the sequence.",
-                item.Name(), parent.Name(), parent.Type(),
+                expected_item.Name(), parent.Name(), parent.Type(),
             )
 
         # 3. Verify tool availability
@@ -245,13 +254,13 @@ class Release(BasePrimitive):
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
-            message=f"Release check passed: item '{item.Name()}' is valid and tool is available.",
+            message=f"Release check passed: item '{expected_item.Name()}' is valid and tool is available.",
         )
 
     @require_robot_active
     def execute(
         self,
-        item: robolink.Item,
+        expected_item: robolink.Item,
         tool: Optional[robolink.Item] = None,
     ) -> SkillResult:
         try:
@@ -273,7 +282,7 @@ class Release(BasePrimitive):
 
             logger.info(
                 "Release: detached all objects from tool '%s' (expected item: '%s').",
-                tool_item.Name(), item.Name(),
+                tool_item.Name(), expected_item.Name(),
             )
             state = _snapshot_with_gripper(self.robot, gripper_state="OPEN")
             return SkillResult(
@@ -281,9 +290,7 @@ class Release(BasePrimitive):
                 execution_phase=ExecutionPhase.EXECUTION,
                 robot_state=state,
                 message=f"Released all objects from tool '{tool_item.Name()}' successfully.",
-                # item.Name() retained for caller traceability even though all
-                # attached objects were released.
-                data={"item_name": item.Name(), "tool_name": tool_item.Name()},
+                data={"expected_item": expected_item.Name(), "tool_name": tool_item.Name()},
             )
 
         except Exception as e:
@@ -299,10 +306,10 @@ class Release(BasePrimitive):
 
     def try_execute(
         self,
-        item: robolink.Item,
+        expected_item: robolink.Item,
         tool: Optional[robolink.Item] = None,
     ) -> SkillResult:
-        check = self.check(item, tool)
+        check = self.check(expected_item, tool)
         if not check.success:
             return check
-        return self.execute(item, tool)
+        return self.execute(expected_item, tool)
