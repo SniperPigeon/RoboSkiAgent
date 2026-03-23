@@ -95,7 +95,39 @@ class RobotContext:
         except Exception:
             return RobotState(gripper_state="UNKNOWN")
 
-    # TODO Provide all variables in RoboDK Tree for LLM to access. But not sure where to put those.
+    @property
+    def is_simulation(self) -> bool:
+        """True when RoboDK is running in simulation mode (not connected to real hardware)."""
+        return self.RDK.RunMode() == robolink.RUNMODE_SIMULATE
+
+    def get_gripper_state(self) -> dict:
+        """
+        Return current gripper state as a symbol-only dict (no coordinates).
+
+        Simulation: infers grasped objects from RoboDK parent-child relationships.
+        Real robot: reads digital IO signal from gripper sensor.
+
+        Returns:
+            {
+                "active_tool": str,       # name of the currently active tool
+                "grasped": list[str],     # names of objects currently held by the gripper
+            }
+        """
+        tool = self.robot.getLink(robolink.ITEM_TYPE_TOOL)
+        if not tool.Valid():
+            return {"active_tool": None, "grasped": []}
+
+        if self.is_simulation:
+            grasped = [c.Name() for c in tool.Childs()
+                       if c.Type() == robolink.ITEM_TYPE_OBJECT]
+        else:
+            # TODO: replace with actual IO pin from config when real-robot support is added
+            raise NotImplementedError(
+                "Real-robot gripper state requires IO configuration. "
+                "Set self.config.gripper_sensor_pin and implement DI read."
+            )
+
+        return {"active_tool": tool.Name(), "grasped": grasped}
 
 
 # ============= Primitive Registry (Singleton) =============
