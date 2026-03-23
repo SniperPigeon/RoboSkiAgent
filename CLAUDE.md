@@ -46,18 +46,20 @@
 RoboSkiAgent/
 ├── CLAUDE.md
 ├── IMPLEMENTATION_CHECKLIST.md
-├── Agent/                          # 实验用 Notebook，不含生产代码
-│   ├── langchain_rag.ipynb
-│   └── LangGraph.ipynb
-└── SkiLib/                         # 核心库
+├── Agent/                          # Agent 编排层（生产代码）；依赖 SkiLib，单向依赖
+│   ├── __init__.py
+│   ├── graph.py                    # LangGraph 状态机：GlobalState / 节点 / 路由条件边（stub 阶段，待 Phase 3 重写）
+│   └── notebooks/                  # 实验用 Notebook，不含生产代码
+│       ├── langchain_rag.ipynb
+│       └── LangGraph.ipynb
+└── SkiLib/                         # 纯技能库（无 LangGraph 依赖，可独立测试）
     ├── ARCHITECTURE.md
     ├── __init__.py
     ├── base.py                     # 核心抽象：BasePrimitive / BaseSkill / SkillResult / as_tools() / TOOL_METHODS
     ├── robotcontext.py             # 运行时单例：RobotContext / PrimitiveRegistry
     ├── registry.py                 # SkillRegistry 单例：反射扫描 skills/，实例化 BaseSkill，暴露 get_tools()
     ├── log.py                      # Logger 工厂：get_logger(__name__)，双 Handler（控制台 + 轮转文件）
-    ├── graph.py                    # LangGraph 状态机（stub 阶段，待 Phase 3 重写）
-    ├── main.py                     # 调试入口（非生产）
+    ├── main.py                     # 技能库调试入口（非生产，独立于 Agent 编排）
     ├── RDK_Test.py
     ├── utils.py
     ├── doc/
@@ -72,7 +74,7 @@ RoboSkiAgent/
         └── dummy_skills.py         # 测试桩（非生产）
 ```
 
-**Agent/ 与 SkiLib/ 的关系**：Agent Notebook 通过导入 SkiLib 调用技能库，本身不包含任何业务逻辑实现。
+**Agent/ 与 SkiLib/ 的关系**：`Agent/` 是编排层，通过 `from SkiLib.xxx import ...` 调用技能库。依赖方向单向：`Agent → SkiLib`，SkiLib 本身不依赖 LangGraph。
 
 ---
 
