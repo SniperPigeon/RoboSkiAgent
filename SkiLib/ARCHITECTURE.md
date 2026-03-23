@@ -48,8 +48,8 @@ primitives = context.primitives  # 快捷访问所有primitives
 - 集中管理primitive生命周期
 
 **自动发现规则**:
-1. 扫描 `SkiLib.primitives.motion` 模块（可扩展到整个文件夹）
-2. 查找所有 `BasePrimitive` 子类
+1. 扫描整个 `SkiLib/primitives/` 文件夹（跳过以 `_` 开头的文件）
+2. 查找所有 `BasePrimitive` 子类（精确匹配 `cls.__module__ == module_name` 防止外部导入误注册）
 3. 自动实例化并注册到字典
 
 **扩展方式**:
@@ -87,20 +87,24 @@ all_primitives = context.primitive_registry.get_all()
 ```python
 class MoveJ(BasePrimitive):
     def __init__(self, robot_object, RDK_object):
-        super().__init__(robot_object, RDK_object)
-    
-    def check(self, target, ref_frame=None) -> CheckResult:
+        self.robot = robot_object
+        self.RDK   = RDK_object
+
+    def check(self, target, ref_frame=None) -> SkillResult:
         # 检查逻辑（碰撞、IK、关节限位等）
         pass
-    
-    def execute(self, target, ref_frame=None):
-        # 执行逻辑
+
+    @require_robot_active
+    def execute(self, target, ref_frame=None) -> SkillResult:
+        # 执行逻辑；内部异常全部捕获，禁止向上抛出
         pass
-    
-    def try_execute(self, target, ref_frame=None):
+
+    def try_execute(self, target, ref_frame=None) -> SkillResult:
         # check + execute
         pass
 ```
+
+> **注意**：`BasePrimitive.__init__` 不接受参数（抽象基类），各 Primitive 子类直接在 `__init__` 中赋值 `self.robot` / `self.RDK`，无需调用 `super().__init__()`。
 
 **平台依赖**:
 - ✅ **允许** import robodk（底层实现必须依赖平台）
@@ -252,20 +256,31 @@ def test_pick_and_place():
 
 ### 添加新Primitive
 ```python
-# 1. 在 SkiLib/primitives/gripper.py 创建文件
-from SkiLib.base import BasePrimitive, CheckResult
+# 1. 在 SkiLib/primitives/my_primitive.py 创建文件
+from SkiLib.base import BasePrimitive, SkillResult, ExecutionPhase, require_robot_active
 
-class Grasp(BasePrimitive):
-    def check(self, force=50):
-        # 检查逻辑
-        return CheckResult(is_valid=True)
-    
-    def execute(self, force=50):
-        # RoboDK gripper API
-        self.robot.setDO(1, 1)  # 示例
+class MyPrimitive(BasePrimitive):
+    def __init__(self, robot_object, RDK_object):
+        self.robot = robot_object
+        self.RDK   = RDK_object
+
+    def check(self, param: str) -> SkillResult:
+        # 前置检查逻辑
+        return SkillResult(success=True, execution_phase=ExecutionPhase.PLANNING)
+
+    @require_robot_active
+    def execute(self, param: str) -> SkillResult:
+        # 执行逻辑；内部异常全部捕获，返回 SkillResult，禁止向上抛出
+        ...
+
+    def try_execute(self, param: str) -> SkillResult:
+        check = self.check(param)
+        if not check.success:
+            return check
+        return self.execute(param)  # type: ignore
 
 # 2. 重启程序，自动注册！
-# context.primitives['Grasp'] 现在可用
+# context.primitives['MyPrimitive'] 现在可用
 ```
 
 ### 添加新Skill
@@ -316,26 +331,30 @@ skill = Inspection(
 ## ⚙️ 配置建议
 
 ### 当前Primitives（已实现/计划）
-- ✅ `MoveJ` - 关节运动
-- ⏳ `MoveL` - 直线运动（待实现）
-- ⏳ `Grasp` - 抓取（待实现）
-- ⏳ `Release` - 释放（待实现）
-- ⏳ `Screw` - 螺丝刀（未来）
 
-> 由于primitives数量少（<10个），集中管理比动态加载更简洁
+| 原语 | 状态 | 文件 | 说明 |
+|------|------|------|------|
+| `MoveJ` | ✅ 完整 | `primitives/motion.py` | 关节运动；check + execute + try_execute |
+| `MoveL` | ✅ 完整 | `primitives/motion.py` | 直线运动；含全路径 IK 可解性 + 奇点检测 |
+| `Grasp` | ✅ 完整 | `primitives/gripper.py` | 夹爪闭合；`tool.AttachClosest()` 仿真抓取；参数：`force`（N）、`width`（mm） |
+| `Release` | ✅ 完整 | `primitives/gripper.py` | 夹爪打开；`held_item.setParentStatic(station)` 保持世界坐标；参数：`width`（mm） |
+| `Screw` | ⏳ 待实现 | `primitives/screw.py` | 螺丝刀（未来） |
+
+> [2026-03-16 更新] Grasp/Release 已实现。夹爪状态（持有物体）统一存储在 `RobotContext.held_item`，而非模块变量，保证运行时单一真相来源。
 
 ### 推荐文件结构
 ```
 SkiLib/
-├── base.py                    # BasePrimitive, BaseSkill, CheckResult
-├── robotcontext.py            # RobotContext, PrimitiveRegistry
+├── base.py                    # BasePrimitive, BaseSkill, SkillResult
+├── robotcontext.py            # RobotContext (held_item等运行时状态), PrimitiveRegistry
+├── log.py                     # get_logger()，双 Handler（控制台 + 轮转文件）
 ├── utils.py                   # IKSolver等工具
 ├── main.py                    # 示例程序
-├── primitives/                # 平台相关实现
+├── primitives/                # 平台相关实现（import robodk）
 │   ├── __init__.py
 │   ├── motion.py              # MoveJ, MoveL
-│   └── gripper.py             # Grasp, Release (future)
-└── skills/                    # 平台无关逻辑
+│   └── gripper.py             # Grasp, Release
+└── skills/                    # 平台无关逻辑（禁止 import robodk）
     ├── __init__.py
     ├── pick_and_place.py      # PickAndPlace skill
     └── inspection.py          # Inspection skill (future)

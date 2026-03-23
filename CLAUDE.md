@@ -23,6 +23,7 @@
 - 当发现原文档的设计有问题时或与你探讨出有问题时，应在许可后将发现更新至文档并修改原来的表述，但是不要直接替换以保留迭代过程。
 - 在规划时思考隐藏的逻辑问题，包括但不限于造成逻辑死锁的设计、兜底过多导致过度静默处理错误都应避免。
 - **禁止在 `SkiLib/` 生产代码中使用 `print()`**，一律通过 `SkiLib/log.py` 提供的 `get_logger(__name__)` 获取模块级 logger 输出。Logger 配置双 Handler（控制台 StreamHandler + 轮转文件 RotatingFileHandler），行为与 print 等价但支持级别过滤和持久化。Notebook 实验代码不受此约束。详见 Phase 5 实现计划。
+- **完成实现后必须更新文档**：每次新增或修改 Primitive / Skill / 核心字段后，同步更新 `SkiLib/ARCHITECTURE.md` 对应章节（状态标记、字段说明、示例代码）以及本文件（`CLAUDE.md`）中的目录结构与已知风险条目。文档与代码必须保持一致，过期文档视同技术债务。
 ---
 
 
@@ -61,7 +62,8 @@ RoboSkiAgent/
     │   └── IMPLEMENTATION_PLAN_SkillRegistry.md
     ├── examples/
     ├── primitives/
-    │   └── motion.py               # MoveJ (完整) / MoveL (execute 完整, check 待实现)
+    │   ├── motion.py               # MoveJ (完整) / MoveL (完整)
+    │   └── gripper.py              # Grasp (完整) / Release (完整)
     └── skills/
         └── pick_and_place.py
 ```

@@ -60,6 +60,9 @@ class RobotContext:
         # Safety flag: set True by Context Flush on failure; cleared on resume
         self.halt_flag: bool = False
 
+        # Currently held item in the gripper; set by Grasp.execute(), cleared by Release.execute()
+        self.held_item: Optional[robolink.Item] = None
+
         # Auto-initialize primitive registry
         self.primitive_registry = PrimitiveRegistry(self.robot, self.RDK)
         self._initialized = True
