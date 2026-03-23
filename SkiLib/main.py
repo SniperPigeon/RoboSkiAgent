@@ -74,6 +74,8 @@ if __name__ == "__main__":
     print("check_item_exists('App Pick Part A'):", check_item_exists.invoke({"name": "App Pick Part A"}))
     print("check_item_exists('NonExistent'):",     check_item_exists.invoke({"name": "NonExistent"}))
     print("get_gripper_state():",   get_gripper_state.invoke({}))
+    
+    print(SkillRegistry.instance().get_skill('PickAndPlace').as_tools())
 
     # from typing import cast
     # from SkiLib.skills.pick_and_place import PickAndPlace
