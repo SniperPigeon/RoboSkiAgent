@@ -183,7 +183,7 @@
 
 - [ ] **4.1** 端到端仿真测试（RoboDK 仿真模式，不连接真机）
   - 用例 1：正常指令 "将 Part_A 装入 Tray_1" → Supervisor 查树 → Planner 生成 todo_list → PickAndPlace 执行完整序列
-  - 用例 2：目标名称错误 → `GetApproachTarget` 返回 `NO_APPROACH_TARGET` → Executor 失败 → HILP 暂停 → 操作员 abort
+  - 用例 2：目标名称错误 → `GetApproachTarget` 返回 `NO_APPROACH_TARGET` → Executor 失败 → HITL 暂停 → 操作员 abort
   - 用例 3：模糊指令 → Supervisor 调用 `request_human_intervention` → 图暂停 → 操作员补充信息 → resume
 
 - [ ] **4.2** `SkillResult` 迁移扫描
@@ -195,7 +195,7 @@
   - 确认 Context Flush 后 Executor `ToolMessage` 已被清除
   - 测试长序列（10 个任务）时消息列表不膨胀
 
-- [ ] **4.5** 端到端 HILP 路径验证（新增）
+- [ ] **4.5** 端到端 HITL 路径验证（新增）
   - 用例 4：Planner 输出含 `type="manual"` 任务 → Dispatcher 识别 → `interrupt` 暂停
     → 操作员发 `complete` → Dispatcher 继续剩余自动任务（全程无 halt_flag 残留）
   - 用例 5：Executor 失败（`needs_hilp=True`）→ `halt_reason="TASK_FAILURE"` → 操作员发 `retry`
@@ -223,7 +223,7 @@
   - 模块顶部：`logger = get_logger("graph")`
   - 各节点 `print()` → `logger.info()` / `logger.debug()` / `logger.warning()`
   - 级别约定：
-    - `INFO`：节点入口/出口、任务 dispatch、HILP 触发
+    - `INFO`：节点入口/出口、任务 dispatch、HITL 触发
     - `DEBUG`：Supervisor 每次 tool_call 详情、Executor 内部重试
     - `WARNING`：保守 fallthrough（`needs_hilp=False + success=False`）、manual 任务 retry 降级
     - `ERROR`：Planner retry 耗尽、未知 skill

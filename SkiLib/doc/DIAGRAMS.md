@@ -14,7 +14,7 @@ graph TB
         direction LR
         SUP["🧠 Supervisor<br/>────────────────<br/>ReAct loop<br/>Use Task-Skills to resolve ambiguity<br/>Only handles symbols/IDs<br/>❌ Do not compute coordinates"]
         PLAN["📋 Planner<br/>────────────────<br/>Structured output<br/>Generate todo_list JSON<br/>Validation + Retry (×3)<br/>❌ No vague descriptions"]
-        SUP -->|"Knowledge saturation / HILP"| PLAN
+        SUP -->|"Knowledge saturation / HITL"| PLAN
     end
 
     subgraph LAYER2["Layer 2 · Execution Layer (Deterministic + LLM)"]
@@ -25,7 +25,7 @@ graph TB
         DISP --> EXEC --> FLUSH
     end
 
-    subgraph HILP["Human Intervention Layer (HILP)"]
+    subgraph HITL["Human Intervention Layer (HITL)"]
         HI["👤 Human Intervention<br/>────────────────<br/>interrupt() pauses the graph<br/>Wait for retry / abort<br/>Command(resume=...)"]
     end
 
@@ -63,11 +63,11 @@ stateDiagram-v2
         [*] --> ReActLoop
         ReActLoop --> ReActLoop : tool_call (query scene/spec)
         ReActLoop --> [*] : no tool_call (knowledge saturation)
-        ReActLoop --> HILP_Trigger : call request_human_intervention
+        ReActLoop --> HITL_Trigger : call request_human_intervention
     }
 
     Supervisor --> Planner : knowledge saturation
-    HILP_Trigger --> HumanIntervention : interrupt
+    HITL_Trigger --> HumanIntervention : interrupt
 
     state Planner {
         [*] --> StructuredOutput
@@ -101,9 +101,9 @@ stateDiagram-v2
             [*] --> ReActLoop2
             ReActLoop2 --> ReActLoop2 : internal recovery retries
             ReActLoop2 --> WriteSuccess : success
-            ReActLoop2 --> WriteFailHILP : give up needs_hilp=True
+            ReActLoop2 --> WriteFailHITL : give up needs_hilp=True
             WriteSuccess --> [*]
-            WriteFailHILP --> [*]
+            WriteFailHITL --> [*]
         }
 
         Executor --> ContextFlush
@@ -153,7 +153,7 @@ flowchart LR
         TODO["todo_list: list[dict]<br/>supports mixed auto/manual"]
         CUR["current_task: dict<br/>execution slot: {} = idle"]
         LAST["last_result: Optional[dict]<br/>includes needs_hilp field"]
-        HALT["halt_flag: bool<br/>HILP trigger"]
+        HALT["halt_flag: bool<br/>HITL trigger"]
         HREASON["halt_reason: Optional[str]<br/>TASK_FAILURE / MANUAL_TASK"]
         LOG["execution_log: list[str]<br/>audit trail (operator.add)"]
         RS["robot_state: RobotState<br/>pose/joint snapshot"]
@@ -265,7 +265,7 @@ stateDiagram-v2
 
 ## 6. Agent 高层控制流（概览）
 
-> 展示从自然语言指令到任务完成的完整主路径，以及 HILP 挂起与恢复的关键分支。
+> 展示从自然语言指令到任务完成的完整主路径，以及 HITL 挂起与恢复的关键分支。
 > 省略节点内部细节（ReAct 循环、retry 逻辑等），聚焦于**节点间的路由决策**。
 
 ```mermaid
@@ -287,7 +287,7 @@ flowchart TD
         EXEC --> CF
     end
 
-    subgraph HILP["Human Intervention Layer"]
+    subgraph HITL["Human Intervention Layer"]
         HI["👤 Human Intervention<br/><i>interrupt() · await operator action</i>"]
     end
 
@@ -311,13 +311,13 @@ flowchart TD
     HI -->|"complete<br/>clear current_task"| DISP
     HI -->|"abort<br/>clear queue"| DONE
 
-    %% ── Supervisor HILP ──
+    %% ── Supervisor HITL ──
     SUP -.->|"request_human_intervention"| HI
 
     %% ── 样式 ──
     style L1   fill:#dbeafe,stroke:#3b82f6
     style L2   fill:#d1fae5,stroke:#10b981
-    style HILP fill:#fef3c7,stroke:#f59e0b
+    style HITL fill:#fef3c7,stroke:#f59e0b
     style START fill:#f0fdf4,stroke:#16a34a
     style DONE  fill:#f0fdf4,stroke:#16a34a
     style HI    fill:#fef9c3,stroke:#ca8a04
