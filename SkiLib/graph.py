@@ -41,10 +41,10 @@ class GlobalState(TypedDict):
     robot_state: dict
 
     # Control flags
-    halt_flag: bool                 # True = all R-skill execution locked (HILP trigger)
+    halt_flag: bool                 # True = all R-skill execution locked (HITL trigger)
     halt_reason: Optional[str]      # "TASK_FAILURE" | "MANUAL_TASK" | None — read by human_intervention
 
-    # Executor writes result here; Context Flush uses needs_hilp field to decide HILP path
+    # Executor writes result here; Context Flush uses needs_hitl field to decide HITL path
     last_result: Optional[dict]
 
     # Internal routing: written by human_intervention, read by after_human_intervention only
@@ -126,10 +126,10 @@ def dispatcher(state: GlobalState) -> dict:
     result: dict = {"current_task": task, "todo_list": todo}
 
     if task.get("type") == "manual":
-        # Manual task: pre-set HILP flags so after_dispatcher routes to human_intervention
+        # Manual task: pre-set HITL flags so after_dispatcher routes to human_intervention
         result["halt_flag"]   = True
         result["halt_reason"] = "MANUAL_TASK"
-        print(f"[dispatcher] Manual task detected — flagging HILP (MANUAL_TASK).")
+        print(f"[dispatcher] Manual task detected — flagging HITL (MANUAL_TASK).")
 
     return result
 
@@ -167,7 +167,7 @@ def human_intervention(state: GlobalState) -> dict:
     action = "complete" if reason == "MANUAL_TASK" else "abort"
     print(f"[human_intervention] Auto-action (stub): {action}")
 
-    # MANUAL_TASK + retry is illegal — executor has no skill to run, causes infinite HILP loop
+    # MANUAL_TASK + retry is illegal — executor has no skill to run, causes infinite HITL loop
     if action == "retry" and reason == "MANUAL_TASK":
         print("[human_intervention] retry on MANUAL_TASK is illegal — degrading to abort.")
         action = "abort"
@@ -208,6 +208,13 @@ def executor(state: GlobalState) -> dict:
     Rule: @require_robot_active must guard all R-skills; halt_flag checked here.
     
     TODO: Replace stub with dynamic Skill loader + SkiLib.base.SkillResult integration.
+    TODO (Layer-1): Add infrastructure retry loop before LLM invocation.
+          - Check SkillResult.error_type; retry with backoff for ERROR_TIMEOUT (transient).
+          - Prerequisite: motion.py must split ERROR_TIMEOUT into finer-grained types
+            (e.g. ERROR_COMMS for socket failures) so retriable vs non-retriable is unambiguous.
+    TODO (Layer-2): Implement LLM ReAct recovery loop.
+          - bind_tools(skill_registry.get_tools()), loop until success or needs_hitl=True.
+          - needs_hitl=False is internal state; must never appear in last_result on node exit.
     """
     task = state.get("current_task", {})
     

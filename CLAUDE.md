@@ -48,10 +48,11 @@ RoboSkiAgent/
 ├── IMPLEMENTATION_CHECKLIST.md
 ├── Agent/                          # Agent 编排层（生产代码）；依赖 SkiLib，单向依赖
 │   ├── __init__.py
-│   ├── graph.py                    # LangGraph 状态机：GlobalState / 节点 / 路由条件边（stub 阶段，待 Phase 3 重写）
-│   └── notebooks/                  # 实验用 Notebook，不含生产代码
-│       ├── langchain_rag.ipynb
-│       └── LangGraph.ipynb
+│   ├── graph.py                    # LangGraph 状态机：GlobalState / 节点 / 路由条件边（待正式实现）
+│   └── notebooks/                  # 实验用 Notebook，不含生产代码；验证通过后迁移至 Agent/
+│       ├── langchain_rag.ipynb     # RAG 实验
+│       ├── LangGraph.ipynb         # 早期图流转探索（已过期，保留作参考）
+│       └── graph_test.ipynb        # 当前活跃实验：Supervisor/Planner 已验证，Dispatcher 骨架开发中
 └── SkiLib/                         # 纯技能库（无 LangGraph 依赖，可独立测试）
     ├── ARCHITECTURE.md
     ├── __init__.py
@@ -60,6 +61,8 @@ RoboSkiAgent/
     ├── registry.py                 # SkillRegistry 单例：反射扫描 skills/，实例化 BaseSkill，暴露 get_tools()
     ├── log.py                      # Logger 工厂：get_logger(__name__)，双 Handler（控制台 + 轮转文件）
     ├── main.py                     # 技能库调试入口（非生产，独立于 Agent 编排）
+    ├── graph.py                    # ⚠️ 错位文件：含 LangGraph 依赖，违反 SkiLib 无 LangGraph 约束；
+    │                               #   待迁移至 Agent/notebooks/ 或正式采纳后移入 Agent/graph.py
     ├── RDK_Test.py
     ├── utils.py
     ├── doc/
@@ -106,6 +109,9 @@ RoboSkiAgent/
 > [2026-03-13 更新] 新增 manual 任务路径：
 - ✅ **manual 任务**：填入 `type="manual"` 的任务时，同时设 `halt_flag=True`、`halt_reason="MANUAL_TASK"`，由 `after_dispatcher` 条件边路由到 `human_intervention`，绕过 Executor
 
+> [2026-03-25 更新] `human_intervention` 已拆分为两个节点，manual 路径目标节点改为 `manual_task_handler`：
+- ✅ **manual 任务**：填入后由 `after_dispatcher` 路由到 `manual_task_handler`（不再是 `human_intervention`）
+
 **Executor**
 - 只关注当前 `current_task`，动态加载 P/R/E-skills 完成单步物理动作
 - ✅ 执行结果写入 `last_result`（数据用途），Context Flush 据此决定成功/失败路径
@@ -123,14 +129,28 @@ RoboSkiAgent/
 - ✅ **失败且 `last_result.needs_hilp=False`**：理论上不应出现（Executor 未放弃时不应退出节点）；若出现，保守 fallthrough 至 halt，不允许静默跳过失败任务
 - ✅ **成功时**：额外清空 `halt_reason=None`
 
-**HumanIntervention**（LangGraph interrupt，新增节点）
-- 接收两类入口：
-  - `halt_reason="TASK_FAILURE"`：Executor 无法自愈，操作员选择 `retry` 或 `abort`
-  - `halt_reason="MANUAL_TASK"`：计划内人工任务，操作员选择 `complete` 或 `abort`
-- `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务
+~~**HumanIntervention**（LangGraph interrupt，新增节点）~~
+~~- 接收两类入口：~~
+~~  - `halt_reason="TASK_FAILURE"`：Executor 无法自愈，操作员选择 `retry` 或 `abort`~~
+~~  - `halt_reason="MANUAL_TASK"`：计划内人工任务，操作员选择 `complete` 或 `abort`~~
+~~- `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务~~
+~~- `complete`：清除 `halt_flag/halt_reason`，清空 `current_task` → Dispatcher 推进到下一任务~~
+~~- `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END~~
+~~- ❌ `retry` 对 `MANUAL_TASK` 非法（会导致 Executor 找不到 skill 进入无限 HITL 循环），节点内强制降级为 `abort`~~
+
+> [2026-03-25 更新] 单节点设计有缺陷：两种入口的合法 actions 不同，靠运行时 guard 防御非法组合（`retry` on `MANUAL_TASK`）是设计异味。拆分为两个独立节点，非法组合从结构上消失。
+
+**ManualTaskHandler**（LangGraph interrupt，计划内人工步骤）
+- 唯一入口：`after_dispatcher` 路由 `type="manual"` 任务
+- 操作员 actions：`complete` / `abort`（不提供 `retry`，结构上排除非法组合）
 - `complete`：清除 `halt_flag/halt_reason`，清空 `current_task` → Dispatcher 推进到下一任务
 - `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
-- ❌ `retry` 对 `MANUAL_TASK` 非法（会导致 Executor 找不到 skill 进入无限 HILP 循环），节点内强制降级为 `abort`
+
+**TaskFailureHandler**（LangGraph interrupt，执行故障恢复）
+- 唯一入口：`context_flush` 失败路径（`needs_hilp=True`）
+- 操作员 actions：`retry` / `abort`（不提供 `complete`，语义上不合理）
+- `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务
+- `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
 
 ---
 
@@ -151,8 +171,9 @@ class GlobalState(TypedDict):
 ```python
 class GlobalState(TypedDict):
     # ... 原有字段不变 ...
-    halt_reason: Optional[str]   # "TASK_FAILURE" | "MANUAL_TASK" | None；HumanIntervention 节点读取以展示正确提示
-    _hi_action:  Optional[str]   # 内部路由字段：human_intervention 写入，after_human_intervention 读取，不对外暴露
+    halt_reason: Optional[str]   # "TASK_FAILURE" | "MANUAL_TASK" | None；诊断用，节点拆分后不再作路由信号
+    _hi_action:  Optional[str]   # 内部路由字段：manual_task_handler / task_failure_handler 写入，
+                                 #   after_manual_task / after_task_failure 读取，不对外暴露
 ```
 
 **todo_list 任务格式（新增 `type` 字段）：**
@@ -196,7 +217,7 @@ class SkillResult:
 class SkillResult:
     # ... 原有字段不变 ...
     needs_hilp: bool = True
-    # True（默认）= Executor 已放弃，Context Flush 应触发 HILP
+    # True（默认）= Executor 已放弃，Context Flush 应触发 HITL
     # False       = Executor 内部 ReAct 仍在尝试恢复，此状态不应从 Executor 节点输出；
     #               若 Context Flush 意外收到 success=False + needs_hilp=False，
     #               保守处理为 needs_hilp=True（防止静默跳过失败任务）
@@ -337,4 +358,4 @@ Supervisor 遇到规范描述模糊时，必须调用 `request_human_interventio
 2. **手脚不看业务** — Executor 只接受参数指令，不解析 YAML，不理解"为什么"
 3. **错误必须具身化** — 底层物理错误必须经 `SkillResult` 翻译，禁止裸露 traceback
 4. **流转必须确定性** — 任务调度由 Dispatcher 纯代码掌控，LLM 只负责推理
-5. **宁挂起不幻觉** — 遇到能力边界触发 HILP，禁止幻觉出不存在的工具或动作
+5. **宁挂起不幻觉** — 遇到能力边界触发 HITL，禁止幻觉出不存在的工具或动作
