@@ -110,6 +110,13 @@ class MoveJ(BasePrimitive):
                 data={"joints": state.joints},
             )
         except Exception as e:
+            # TODO: error_type is over-broadly mapped to ERROR_TIMEOUT here.
+            # RoboDK communication failures (socket disconnect, process crash) and
+            # execution anomalies (unexpected joint limit, servo fault) are currently
+            # indistinguishable. A finer-grained mapping is needed so that Executor
+            # Layer-1 retry logic can correctly identify retriable vs non-retriable failures.
+            # Suggested split: ERROR_COMMS for robolink socket errors, ERROR_TIMEOUT for
+            # genuine timeouts, and preserve ERROR_TIMEOUT only as a catch-all fallback.
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
@@ -245,6 +252,7 @@ class MoveL(BasePrimitive):
                 data={"pose": state.pose},
             )
         except Exception as e:
+            # TODO: same over-broad error_type mapping as MoveJ — see MoveJ.execute() TODO.
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
