@@ -1,7 +1,7 @@
 # RoboSkiAgent 实现 Checklist
 
 > 按依赖顺序排列。每阶段完成后再进入下一阶段。
-> 最后更新：2026-03-20（graph.py 路由重构）
+> 最后更新：2026-03-26（graph_test.ipynb 框架重构；Supervisor/Planner 真实实现）
 
 ---
 
@@ -102,9 +102,9 @@
   - **实现方案与原规划不同**：接近点改为显式参数（`pick_approach`、`place_approach`），不采用命名约定自动查找（`GetApproachTarget`）
     - **理由**：LLM 作为调用方应明确指定所有目标，隐式命名约定对 LLM 不透明，且增加对 Phase 1 `scene_query` 的不必要依赖
     - `REQUIRED_PRIMITIVES = ['MoveJ', 'MoveL', 'Grasp', 'Release']`（无需 `GetApproachTarget`）
-  - **执行序列**（8步）：`approach_motion→pick_approach` → `MoveL→pick_target` → `Grasp` → `MoveL→pick_approach` → `transit_motion→place_approach` → `MoveL→place_target` → `Release` → `MoveL→place_approach`
-  - **新增参数** `transit_motion: str = "MoveJ"`：控制携工件过渡段（`pick_approach→place_approach`）的运动类型
-  - **新增参数** `approach_motion: str = "MoveJ"`：控制初始进入接近点（`→pick_approach`）的运动类型
+  - **执行序列**（8步）：`initial_motion→pick_approach` → `MoveL→pick_target` → `Grasp` → `MoveL→pick_approach` → `transit_motion→place_approach` → `MoveL→place_target` → `Release` → `MoveL→place_approach`
+  - **参数** `transit_motion: str = "MoveL"`：携工件过渡段运动类型（默认由 MoveJ 改为 MoveL，2026-03-26）
+  - **参数** `initial_motion: str = "MoveL"`：初始进入 pick_approach 的运动类型（原名 `approach_motion`，2026-03-26 重命名并改默认值为 MoveL）
   - `execute()` / `check()` / `try_execute()` 均返回 `SkillResult`，无 `CheckResult` 使用
   - `check()` 验证：所有目标存在性（symbol resolve）+ 各段运动可达性（调用 primitive.check()）
   - `try_execute()` 支持 `_should_skip_check()` bypass（调试用）
@@ -118,44 +118,38 @@
   - `TaskItem(skill: str, params: dict, description: str, expected_result: str)`
   - `TodoList(tasks: List[TaskItem])` — Planner 输出格式
   - 添加 `@field_validator` 检查 `skill` 值是否在已注册技能列表中
+  - ⚠️ **设计变更（2026-03-26）**：Planner 改为工具调用方式，不再直接输出 JSON。`TodoList` schema 可降级为内部验证工具（非 LLM 输出格式），`AutoTask`/`ManualTask` 已在 `graph_test.ipynb` 中定义。
 
-- [ ] **3.2** 重写 `graph.py` — **Planner 节点**
-  - 使用 `claude-sonnet-4-6` + `with_structured_output(TodoList)`
-  - 系统提示：只处理符号/ID，输出合法 `TodoList`，可用技能列表从 `registry.list_skills()` 动态注入
-  - Retry 逻辑：Pydantic 校验失败时最多重试 3 次，失败则设 `halt_flag=True`
-  - 成功后：用 `RemoveMessage` **清除 Supervisor 阶段产生的全部消息**（防污染 Executor）
+- [x] **3.2** `graph_test.ipynb` — **Planner 节点** *(2026-03-26，真实 LLM 实现)*
+  - ~~`with_structured_output(TodoList)`~~ ← 已废弃
+  - ✅ **实际采用**：`create_agent` + 动态工具调用方式
+    - 为每个已注册 Skill 生成 `add_<SkillName>_task` 工具（复用 `try_execute.args_schema`）
+    - 新增 `add_manual_task` 工具
+    - LLM 按顺序调用工具构建 `plan` 列表，返回后写入 `todo_list`
+  - ⚠️ **消息清理未实现**：Supervisor 阶段消息尚未 `RemoveMessage`
 
-- [ ] **3.3** 重写 `graph.py` — **Executor 节点**
-  - 从 `registry.get_skill(current_task["skill"])` 动态加载技能实例
-  - 调用 `skill.execute(**current_task["params"])`，结果写入 `last_result`
-  - 若 skill 不存在：`last_result = {"success": False, "error_type": "UNKNOWN_SKILL", "needs_hilp": True}`
-  - 执行完成后：用 `RemoveMessage` 清除本轮 Executor 产生的 ToolMessage 噪音
-  - **自愈约定**（重要）：Executor 内部 ReAct 循环负责穷举恢复策略（换参数、换路径等）；
-    只有最终放弃时才退出节点并写入 `{"success": False, "needs_hilp": True, ...}`；
-    循环中间状态不写 `last_result` 不退出节点。
-    `needs_hilp=False + success=False` 的组合禁止从节点输出（语义死角，Context Flush 无法合理处理）。
+- [ ] **3.3** `graph_test.ipynb` — **Executor 节点**（stub，待实现）
+  - 当前：stub，返回成功
+  - 待实现：从 `SkillRegistry` 动态加载技能，调用 `skill.try_execute(**params)`
+  - 结果写入 `last_result`；消息清理待补充
 
-- [ ] **3.4** 重写 `graph.py` — **Supervisor 节点**
-  - 使用 `claude-sonnet-4-6` + LangChain `create_react_agent`
-  - 工具集：将 `task_skills.py` 中所有函数包装为 `@tool`（LangChain Tool）
-  - LLM schemas 从 `registry.get_llm_tool_schemas(format="anthropic")` 自动注入
-  - 终止条件：无 tool_call（知识饱和）或调用了 `request_human_intervention`
-  - 调用 `request_human_intervention` 后：**触发 `interrupt("human_intervention")`** 真正暂停图
+- [x] **3.4** `graph_test.ipynb` — **Supervisor 节点** *(2026-03-26，真实 LLM 实现)*
+  - ✅ 使用 `create_agent` + `SupervisorOutput` Pydantic schema（structured response）
+  - 工具集来自 `SkiLib/metatools/informative.py`（T-skills，只读场景查询）
+  - 可用技能列表由代码注入 system prompt（`_get_available_skills()`），LLM 只读取不生成
+  - ~~`create_react_agent`~~ 已废弃，改用新 API `create_agent`
 
-- [x] **3.5** `graph.py` — **`human_intervention` stub 节点** *(2026-03-20，stub)*
-  - ~~新建~~ 已加入图；接收两类入口：
-    - `context_flush` → `halt`（`halt_reason="TASK_FAILURE"`）
-    - `after_dispatcher` → `manual`（`halt_reason="MANUAL_TASK"`）
-  - **stub 自动行为**：`MANUAL_TASK` → `complete`；`TASK_FAILURE` → `abort`
-  - `retry` 对 `MANUAL_TASK` 非法，节点内强制降级为 `abort`（已实现）
-  - **待实现（Phase 3.5 真实版）**：节点内调用 `interrupt({...})`，通过 `Command(resume={"action": ...})` 恢复
+- [x] **3.5** `graph_test.ipynb` — **HITL stub 节点** *(2026-03-26，框架重构)*
+  - 原单节点 `human_intervention` 已彻底拆分为：
+    - `manual_intervention_handler`：处理 `type="manual"` 任务，actions: `complete` / `abort`
+    - `hitl_handler`：处理执行失败，actions: `retry` / `next_task` / `replan` / `abort`
+  - 两个节点当前均为 stub（自动选择默认 action），**待实现 `interrupt()` 真正暂停**
+  - `hitl_handler` 新增 `replan` 路径（回到 supervisor 重规划），`next_task` 路径（跳过失败任务到 dispatcher）
 
-- [x] **3.5.1** `graph.py` — **Dispatcher 条件路由** *(2026-03-20)*
-  - `dispatcher → executor` 静态边已改为 `after_dispatcher` 条件函数
-  - `halt_flag=False` → `executor`（auto 任务）；`halt_flag=True` → `human_intervention`（manual 任务）
-  - Dispatcher 填入 manual 任务时同时设 `halt_flag=True`、`halt_reason="MANUAL_TASK"`
-  - `should_continue` 的 `halt` 路径已从 `END` 改路由到 `human_intervention`
-  - `context_flush` 失败路径补充 `halt_reason="TASK_FAILURE"`
+- [x] **3.5.1** `graph_test.ipynb` — **Dispatcher 条件路由** *(2026-03-26)*
+  - `task_router` 条件函数：`"auto"` → `executor`；`"manual"` → `manual_intervention_handler`；`"END"` → END
+  - `post_task_router` 条件函数（executor 出边）：`"dispatcher"` / `"hitl_handler"` / `"END"`
+  - `manual_intervention_router` / `hitl_router` 各自独立
 
 - [ ] **3.5.2** `SkiLib/base.py` — **SkillResult.needs_hilp 字段**
   - 新增 `needs_hilp: bool = True`（已完成，见 base.py）
@@ -273,7 +267,9 @@
 | `SkiLib/skills/task_skills.py` | ❌ 待建 | 1.2 |
 | `SkiLib/specs/example_assembly.yaml` | ❌ 待建 | 1.3 |
 | `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
-| `SkiLib/graph.py` | ⚠️ stub；路由重构完成（3.5.1/3.5.3 ✅）；LLM 节点待重写（3.2–3.4/3.5 真实版） | 3.2–3.5 |
+| `SkiLib/metatools/informative.py` | ✅ 完成（T-skills: list_targets/objects/tools, check_item_exists, get_gripper_state） | 新增 |
+| `Agent/notebooks/graph_test.ipynb` | ⚠️ Supervisor✅ Planner✅ Dispatcher✅ Executor/HITL stubs⚠️ | 3.2–3.5 |
+| `SkiLib/graph.py` | ⚠️ stub（旧版，已被 graph_test.ipynb 超越）；待迁移或废弃 | — |
 | `SkiLib/main.py` | ⚠️ 调试用，待重写 | 3.6 |
 
 ---

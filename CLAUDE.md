@@ -52,7 +52,12 @@ RoboSkiAgent/
 │   └── notebooks/                  # 实验用 Notebook，不含生产代码；验证通过后迁移至 Agent/
 │       ├── langchain_rag.ipynb     # RAG 实验
 │       ├── LangGraph.ipynb         # 早期图流转探索（已过期，保留作参考）
-│       └── graph_test.ipynb        # 当前活跃实验：Supervisor/Planner 已验证，Dispatcher 骨架开发中
+│       └── graph_test.ipynb        # 当前活跃实验（2026-03-26）：
+│                                   #   Supervisor（create_agent + SupervisorOutput schema）✅
+│                                   #   Planner（工具调用方式，动态生成 add_<Skill>_task 工具）✅
+│                                   #   Dispatcher（纯代码槽位填充）✅
+│                                   #   manual_intervention_handler / hitl_handler（stub，缺 interrupt）⚠️
+│                                   #   executor（stub，缺真实 skill 调用）⚠️
 └── SkiLib/                         # 纯技能库（无 LangGraph 依赖，可独立测试）
     ├── ARCHITECTURE.md
     ├── __init__.py
@@ -65,6 +70,9 @@ RoboSkiAgent/
     │                               #   待迁移至 Agent/notebooks/ 或正式采纳后移入 Agent/graph.py
     ├── RDK_Test.py
     ├── utils.py
+    ├── metatools/                  # T-skills：Supervisor 使用的只读场景查询工具（无坐标，符号名）
+    │   ├── __init__.py
+    │   └── informative.py          # list_targets / list_objects / list_tools / check_item_exists / get_gripper_state
     ├── doc/
     │   ├── DEV_NOTES_SkillRegistry.md
     │   ├── IK_SOLVER_USAGE.md
@@ -73,7 +81,7 @@ RoboSkiAgent/
     │   ├── motion.py               # MoveJ (完整) / MoveL (完整，含 check())
     │   └── gripper.py              # Grasp (完整，仿真) / Release (完整，仿真)；参数 expected_item
     └── skills/
-        ├── pick_and_place.py       # PickAndPlace (完整)：8步序列，显式接近点，approach_motion/transit_motion
+        ├── pick_and_place.py       # PickAndPlace (完整)：8步序列，显式接近点，initial_motion/transit_motion（均默认 MoveL）
         └── dummy_skills.py         # 测试桩（非生产）
 ```
 
@@ -93,10 +101,14 @@ RoboSkiAgent/
 - ❌ 禁止调用任何底层硬件 API
 - ✅ 世界里只有符号和 ID（如 `Target_A`、`Tool_Gripper`）
 
+> [2026-03-26 实现] `graph_test.ipynb` 中已用 `create_agent` + `SupervisorOutput` 结构化 schema 实现真实 LLM 调用。工具集来自 `SkiLib/metatools/informative.py`（T-skills）。可用技能列表由代码注入 system prompt，LLM 不填写。
+
 **Planner**
-- 使用强制结构化输出生成 `todo_list` JSON 任务队列
-- 生成后必须抹除调研阶段的对话记录，防止污染下层
-- ❌ 禁止输出模糊描述，输出必须是合法 JSON
+- ~~使用强制结构化输出生成 `todo_list` JSON 任务队列~~ ← 原设计
+- ✅ **实际采用**（2026-03-26）：工具调用方式 — 为每个已注册 Skill 动态生成 `add_<SkillName>_task` 工具（复用 `try_execute` 的 args_schema），LLM 通过逐一调用工具构建计划，无需直接输出 JSON
+- 优势：LLM 只需会用工具，不需要记住 JSON schema；参数校验由 Pydantic args_schema 自动完成
+- 生成后必须抹除调研阶段的对话记录，防止污染下层（⚠️ 消息清理尚未实现）
+- ❌ 禁止输出模糊描述，参数必须合法
 
 ### Layer 2 · 执行与清理层
 
@@ -111,6 +123,10 @@ RoboSkiAgent/
 
 > [2026-03-25 更新] `human_intervention` 已拆分为两个节点，manual 路径目标节点改为 `manual_task_handler`：
 - ✅ **manual 任务**：填入后由 `after_dispatcher` 路由到 `manual_task_handler`（不再是 `human_intervention`）
+
+> [2026-03-26 更新] `graph_test.ipynb` 框架重构，Dispatcher 路由条件函数改名为 `task_router`（返回 `"auto"` / `"manual"` / `"END"`）；节点命名调整：
+- `manual_task_handler` → `manual_intervention_handler`
+- `task_failure_handler` → `hitl_handler`（新增 `replan` 路径，可回到 Supervisor 重规划）
 
 **Executor**
 - 只关注当前 `current_task`，动态加载 P/R/E-skills 完成单步物理动作
@@ -128,6 +144,8 @@ RoboSkiAgent/
 - ✅ **失败且 `last_result.needs_hilp=True`**：设 `halt_flag=True`，设 `halt_reason="TASK_FAILURE"`；`current_task/todo_list` 保持不变
 - ✅ **失败且 `last_result.needs_hilp=False`**：理论上不应出现（Executor 未放弃时不应退出节点）；若出现，保守 fallthrough 至 halt，不允许静默跳过失败任务
 - ✅ **成功时**：额外清空 `halt_reason=None`
+
+> [2026-03-26 更新] `graph_test.ipynb` 中 Context Flush **不作为独立节点**，其路由逻辑合并为 `executor` 的条件出边函数 `post_task_router`（返回 `"dispatcher"` / `"hitl_handler"` / `"END"`）。消息清理（`RemoveMessage`）尚未实现，待 Phase 4 补充。
 
 ~~**HumanIntervention**（LangGraph interrupt，新增节点）~~
 ~~- 接收两类入口：~~
@@ -175,6 +193,17 @@ class GlobalState(TypedDict):
     _hi_action:  Optional[str]   # 内部路由字段：manual_task_handler / task_failure_handler 写入，
                                  #   after_manual_task / after_task_failure 读取，不对外暴露
 ```
+
+> [2026-03-26 更新] `graph_test.ipynb` 框架重构，`_hi_action` 被两个独立字段替代：
+```python
+class GlobalState(TypedDict):
+    # ... 原有字段不变（含 halt_reason）...
+    intervention_action: Optional[str]  # manual_intervention_handler 写入："complete" | "abort"
+                                        # manual_intervention_router 读取；不跨节点使用
+    hitl_command: Optional[str]         # hitl_handler 写入："retry" | "next_task" | "replan" | "abort"
+                                        # hitl_router 读取；不跨节点使用
+```
+> `replan` 是新增路径：hitl_handler 可发 `"replan"` → 路由回 `supervisor` 重新规划整个序列（原 CLAUDE.md 未包含此选项）
 
 **todo_list 任务格式（新增 `type` 字段）：**
 ```python
