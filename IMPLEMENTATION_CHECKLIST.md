@@ -1,7 +1,7 @@
 # RoboSkiAgent 实现 Checklist
 
 > 按依赖顺序排列。每阶段完成后再进入下一阶段。
-> 最后更新：2026-03-26（graph_test.ipynb 框架重构；Supervisor/Planner 真实实现）
+> 最后更新：2026-03-26（Executor 完整实现；HITL 行为修正；GlobalState last_result 类型升级；端到端 run cell + Planner 单元测试）
 
 ---
 
@@ -128,10 +128,11 @@
     - LLM 按顺序调用工具构建 `plan` 列表，返回后写入 `todo_list`
   - ⚠️ **消息清理未实现**：Supervisor 阶段消息尚未 `RemoveMessage`
 
-- [ ] **3.3** `graph_test.ipynb` — **Executor 节点**（stub，待实现）
-  - 当前：stub，返回成功
-  - 待实现：从 `SkillRegistry` 动态加载技能，调用 `skill.try_execute(**params)`
-  - 结果写入 `last_result`；消息清理待补充
+- [x] **3.3** `graph_test.ipynb` — **Executor 节点** *(2026-03-26，完整实现)*
+  - 直接调用 `skill_registry[skill_name].try_execute(**params)` 执行 `current_task`
+  - 失败时进入 LLM 恢复循环（ReAct 内循环）；放弃时抛 `_EscalateHITLException(error_type, reason, suggestion)`
+  - 所有路径将 `SkillResult` 对象写入 `last_result`（类型已升为 `Optional[SkillResult]`）
+  - 消息清理（`RemoveMessage`）尚未实现，待 Phase 4 补充
 
 - [x] **3.4** `graph_test.ipynb` — **Supervisor 节点** *(2026-03-26，真实 LLM 实现)*
   - ✅ 使用 `create_agent` + `SupervisorOutput` Pydantic schema（structured response）
@@ -139,12 +140,15 @@
   - 可用技能列表由代码注入 system prompt（`_get_available_skills()`），LLM 只读取不生成
   - ~~`create_react_agent`~~ 已废弃，改用新 API `create_agent`
 
-- [x] **3.5** `graph_test.ipynb` — **HITL stub 节点** *(2026-03-26，框架重构)*
+- [x] **3.5** `graph_test.ipynb` — **HITL stub 节点** *(2026-03-26，框架重构 + 行为修正)*
   - 原单节点 `human_intervention` 已彻底拆分为：
     - `manual_intervention_handler`：处理 `type="manual"` 任务，actions: `complete` / `abort`
     - `hitl_handler`：处理执行失败，actions: `retry` / `next_task` / `replan` / `abort`
   - 两个节点当前均为 stub（自动选择默认 action），**待实现 `interrupt()` 真正暂停**
   - `hitl_handler` 新增 `replan` 路径（回到 supervisor 重规划），`next_task` 路径（跳过失败任务到 dispatcher）
+  - **行为修正（2026-03-26）**：
+    - `manual_intervention_handler`：`current_task` 清空改为 `{}`（原 `None`），补齐 `halt_flag/halt_reason` 清零
+    - `hitl_handler`：入口打印 `last_result` 诊断；全路径均清 `halt_flag`；`current_task` 应清空路径改为 `{}`
 
 - [x] **3.5.1** `graph_test.ipynb` — **Dispatcher 条件路由** *(2026-03-26)*
   - `task_router` 条件函数：`"auto"` → `executor`；`"manual"` → `manual_intervention_handler`；`"END"` → END
@@ -164,6 +168,22 @@
   - `type: Literal["auto", "manual"] = "auto"`
   - `type="manual"` 时 `skill` 可为空，`description` 为必填
   - Planner 系统提示补充：可输出 `type="manual"` 任务
+
+- [x] **3.5.5** `graph_test.ipynb` — **端到端 run cell** *(2026-03-26)*
+  - 含 `RobotContext` 初始化 + `graph.invoke(initial_state)` + 执行结果摘要打印
+  - 验证完整 Supervisor → Planner → Dispatcher → Executor → (HITL stub) 链路可跑通
+
+- [x] **3.5.6** `graph_test.ipynb` — **Planner 工具生成单元测试** *(2026-03-26)*
+  - 验证每个已注册 Skill 均生成了对应的 `add_<SkillName>_task` 工具
+  - 验证工具的 `args_schema` 与 `try_execute` 签名一致（Pydantic 模型字段对齐）
+
+- [ ] **3.5.7** `graph_test.ipynb` — **日志职责分离（Gradio / HITL interrupt 前置）**
+  > **必须在实现 `interrupt()` 真正暂停前完成**：interrupt 挂起后操作员界面需展示干净的执行日志；若 messages 仍混有 LLM 推理链，Gradio 无法安全消费。
+  - `messages` 职责收窄：仅用于 LLM Agent 推理链（supervisor 读取上下文），**不再由 executor / planner / hitl_handler 写入状态摘要 AIMessage**
+  - `execution_log` 成为唯一展示渠道：补全 supervisor / planner 节点的写入，格式统一为 `"[节点名] 内容"`
+  - executor 当前对同一事件双写（`execution_log` + `messages` AIMessage）的冗余写入删除 messages 侧
+  - hitl_handler `replan` 路径向 messages 写 `HumanMessage` 触发重规划的行为**保留**（这是 LLM 推理输入，不是展示日志）
+  - 验证：`execution_log` 一次完整运行后覆盖 supervisor → planner → dispatcher → executor → hitl/manual 全链路
 
 - [ ] **3.6** 重写 `SkiLib/main.py`
   - `RobotContext()` 初始化（一次，进程生命周期内保活）
@@ -268,7 +288,7 @@
 | `SkiLib/specs/example_assembly.yaml` | ❌ 待建 | 1.3 |
 | `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
 | `SkiLib/metatools/informative.py` | ✅ 完成（T-skills: list_targets/objects/tools, check_item_exists, get_gripper_state） | 新增 |
-| `Agent/notebooks/graph_test.ipynb` | ⚠️ Supervisor✅ Planner✅ Dispatcher✅ Executor/HITL stubs⚠️ | 3.2–3.5 |
+| `Agent/notebooks/graph_test.ipynb` | ⚠️ Supervisor✅ Planner✅ Dispatcher✅ Executor✅ HITL行为修正✅ interrupt缺失⚠️ | 3.2–3.5.6 |
 | `SkiLib/graph.py` | ⚠️ stub（旧版，已被 graph_test.ipynb 超越）；待迁移或废弃 | — |
 | `SkiLib/main.py` | ⚠️ 调试用，待重写 | 3.6 |
 

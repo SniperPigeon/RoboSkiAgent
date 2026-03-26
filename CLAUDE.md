@@ -56,8 +56,8 @@ RoboSkiAgent/
 │                                   #   Supervisor（create_agent + SupervisorOutput schema）✅
 │                                   #   Planner（工具调用方式，动态生成 add_<Skill>_task 工具）✅
 │                                   #   Dispatcher（纯代码槽位填充）✅
-│                                   #   manual_intervention_handler / hitl_handler（stub，缺 interrupt）⚠️
-│                                   #   executor（stub，缺真实 skill 调用）⚠️
+│                                   #   executor（完整实现：直接调用 try_execute，LLM 恢复循环，_EscalateHITLException 升级）✅
+│                                   #   manual_intervention_handler / hitl_handler（行为修正完成）⚠️（仍缺 interrupt）
 └── SkiLib/                         # 纯技能库（无 LangGraph 依赖，可独立测试）
     ├── ARCHITECTURE.md
     ├── __init__.py
@@ -134,6 +134,12 @@ RoboSkiAgent/
 - ❌ 禁止解析 YAML 规范
 - ❌ 禁止思考业务逻辑（"为什么要抓这个零件"）
 
+> [2026-03-26 更新] `graph_test.ipynb` Executor 节点完整实现：
+- 直接调用 `skill_registry[skill_name].try_execute(**params)` 执行任务
+- 失败时启动 LLM 恢复循环（ReAct 内循环，尝试自愈；循环内 `needs_hilp=False`）
+- 放弃时抛出 `_EscalateHITLException(error_type, reason, suggestion)`，携带结构化失败诊断
+- 所有路径均将 `SkillResult` 对象写入 `last_result`（类型已由 `Optional[dict]` 升为 `Optional[SkillResult]`）
+
 **Context Flush**（纯代码）
 - ✅ **成功时**：清空 `current_task = {}`（腾出槽位），清空 `last_result = None`
 - ✅ **失败时**：设置 `halt_flag = True`；`current_task` 与 `todo_list` 保持不变，resume 后直接重试同一任务
@@ -164,11 +170,21 @@ RoboSkiAgent/
 - `complete`：清除 `halt_flag/halt_reason`，清空 `current_task` → Dispatcher 推进到下一任务
 - `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
 
+> [2026-03-26 修正] `graph_test.ipynb` 实现细节修正：
+- `current_task` 清空值修正为 `{}` （原误写为 `None`，与执行槽语义不符）
+- `halt_flag=False` / `halt_reason=None` 两处字段清零均已补齐
+
 **TaskFailureHandler**（LangGraph interrupt，执行故障恢复）
 - 唯一入口：`context_flush` 失败路径（`needs_hilp=True`）
 - 操作员 actions：`retry` / `abort`（不提供 `complete`，语义上不合理）
 - `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务
 - `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
+
+> [2026-03-26 修正] `graph_test.ipynb` hitl_handler 实现细节修正：
+- 节点入口打印 `last_result` 诊断信息（`error_type`、`suggestion`）
+- **所有路径**（`retry` / `next_task` / `replan` / `abort`）均显式清 `halt_flag=False`；原部分路径遗漏
+- `next_task` / `abort` 路径中 `current_task` 清空值修正为 `{}` （原误写为 `None`）
+- `replan` 路径同样清 `halt_flag/halt_reason`，清空 `current_task`，回到 `supervisor`
 
 ---
 
@@ -180,10 +196,16 @@ class GlobalState(TypedDict):
     current_task: dict           # 执行槽：{} = 空闲，{...} = 执行中或失败保留
     robot_state: RobotState      # 当前机器人位姿、关节角、夹爪状态
     halt_flag: bool              # True = 系统已挂起，等待人工介入
-    last_result: Optional[dict]  # Executor 写入的结果数据（非路由信号）
+    last_result: Optional[SkillResult]  # Executor 写入的结果数据（非路由信号）；原 Optional[dict]，2026-03-26 升为 SkillResult
     execution_log: list[str]     # 极简状态上报，由 Context Flush 写入
     messages: list[BaseMessage]  # LangGraph 消息列表
 ```
+
+> [2026-03-26 设计决策] **messages / execution_log 职责分离**（Gradio 接入 + HITL interrupt 前置条件）
+> - **`execution_log`**：唯一展示渠道。所有节点（supervisor / planner / executor / hitl_handler / manual_intervention_handler）均写入，格式统一 `"[节点名] 内容"`；不参与 LLM 推理，Gradio 订阅此字段。
+> - **`messages`**：职责收窄为 LLM 推理链。supervisor 读取上下文；各节点禁止向此字段追加状态摘要 AIMessage（否则 LLM 每轮都会看到越来越多的执行噪音）。
+> - **例外**：hitl_handler `replan` 路径写入 `HumanMessage` 触发 supervisor 重规划——这是 LLM 推理输入，不是展示日志，保留此行为。
+> - **待实现**：`graph_test.ipynb` 中 executor/planner 双写 messages 的冗余 AIMessage 待删除（见 Checklist 3.5.7）。
 
 > [2026-03-13 更新] 新增两个字段：
 ```python
