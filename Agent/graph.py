@@ -6,7 +6,7 @@ Implements the Plan-and-Execute architecture with two layers:
 - Layer 2 (Execution): Dispatcher → Executor → Context Flush (loop)
 
 Usage:
-    from SkiLib.graph import create_graph
+    from Agent.graph import create_graph
     app = create_graph()
     result = app.invoke(initial_state)
 
@@ -41,10 +41,10 @@ class GlobalState(TypedDict):
     robot_state: dict
 
     # Control flags
-    halt_flag: bool                 # True = all R-skill execution locked (HITL trigger)
+    halt_flag: bool                 # True = all R-skill execution locked (HILP trigger)
     halt_reason: Optional[str]      # "TASK_FAILURE" | "MANUAL_TASK" | None — read by human_intervention
 
-    # Executor writes result here; Context Flush uses needs_hitl field to decide HITL path
+    # Executor writes result here; Context Flush uses needs_hilp field to decide HILP path
     last_result: Optional[dict]
 
     # Internal routing: written by human_intervention, read by after_human_intervention only
@@ -64,15 +64,15 @@ class GlobalState(TypedDict):
 def supervisor(state: GlobalState) -> dict:
     """
     Supervisor Node (LLM-driven)
-    
+
     Role: Gather domain knowledge, resolve ambiguities via task-skills.
     Rule: Never compute coordinates; only handle symbols (Target_A, Tool_Gripper).
-    
+
     TODO: Replace stub with real ReAct loop + task-skills integrated with SkiLib.
     """
     print("[supervisor] Analyzing instruction...")
     last_msg = state["messages"][-1].content if state["messages"] else "(no input)"
-    
+
     return {
         "messages": [AIMessage(content=f"[Supervisor] Instruction understood: {last_msg}")]
     }
@@ -81,21 +81,21 @@ def supervisor(state: GlobalState) -> dict:
 def planner(state: GlobalState) -> dict:
     """
     Planner Node (LLM-driven with Structured Output)
-    
+
     Role: Emit structured todo_list JSON via forced structured output.
     Rule: Output must be valid JSON; add schema validation + retry in production.
-    
+
     TODO: Replace stub with LLM structured output + Pydantic schema + retry logic.
     """
     print("[planner] Generating task plan...")
-    
+
     # STUB: hardcoded task queue for demonstration
     todo = [
         {"task_id": "t1", "skill": "MoveJ",       "params": {"target": "Home"}},
         {"task_id": "t2", "skill": "PickAndPlace", "params": {"pick": "Part_A", "place": "Tray_1"}},
         {"task_id": "t3", "skill": "MoveJ",       "params": {"target": "Home"}},
     ]
-    
+
     return {
         "todo_list": todo,
         "messages":  [AIMessage(content=f"[Planner] {len(todo)} tasks queued")],
@@ -126,10 +126,10 @@ def dispatcher(state: GlobalState) -> dict:
     result: dict = {"current_task": task, "todo_list": todo}
 
     if task.get("type") == "manual":
-        # Manual task: pre-set HITL flags so after_dispatcher routes to human_intervention
+        # Manual task: pre-set HILP flags so after_dispatcher routes to human_intervention
         result["halt_flag"]   = True
         result["halt_reason"] = "MANUAL_TASK"
-        print(f"[dispatcher] Manual task detected — flagging HITL (MANUAL_TASK).")
+        print(f"[dispatcher] Manual task detected — flagging HILP (MANUAL_TASK).")
 
     return result
 
@@ -167,7 +167,7 @@ def human_intervention(state: GlobalState) -> dict:
     action = "complete" if reason == "MANUAL_TASK" else "abort"
     print(f"[human_intervention] Auto-action (stub): {action}")
 
-    # MANUAL_TASK + retry is illegal — executor has no skill to run, causes infinite HITL loop
+    # MANUAL_TASK + retry is illegal — executor has no skill to run, causes infinite HILP loop
     if action == "retry" and reason == "MANUAL_TASK":
         print("[human_intervention] retry on MANUAL_TASK is illegal — degrading to abort.")
         action = "abort"
@@ -203,35 +203,28 @@ def after_human_intervention(state: GlobalState) -> str:
 def executor(state: GlobalState) -> dict:
     """
     Executor Node (LLM-driven with dynamic skill loading)
-    
+
     Role: Execute current_task via the matching Skill; report result in last_result.
     Rule: @require_robot_active must guard all R-skills; halt_flag checked here.
-    
+
     TODO: Replace stub with dynamic Skill loader + SkiLib.base.SkillResult integration.
-    TODO (Layer-1): Add infrastructure retry loop before LLM invocation.
-          - Check SkillResult.error_type; retry with backoff for ERROR_TIMEOUT (transient).
-          - Prerequisite: motion.py must split ERROR_TIMEOUT into finer-grained types
-            (e.g. ERROR_COMMS for socket failures) so retriable vs non-retriable is unambiguous.
-    TODO (Layer-2): Implement LLM ReAct recovery loop.
-          - bind_tools(skill_registry.get_tools()), loop until success or needs_hitl=True.
-          - needs_hitl=False is internal state; must never appear in last_result on node exit.
     """
     task = state.get("current_task", {})
-    
+
     if not task:
         return {
             "execution_log": ["[executor] No task — skipping."],
             "last_result": {"success": True},
         }
-    
+
     if state.get("halt_flag"):
         return {
             "execution_log": [f"[executor] HALTED — skipping {task.get('task_id')}"],
             "last_result": {"success": False, "error_type": "ROBOT_INACTIVE"},
         }
-    
+
     print(f"[executor] Running: {task['skill']}({task['params']})")
-    
+
     # STUB: simulate success without touching robot
     return {
         "execution_log": [f"[executor] {task['task_id']} {task['skill']} -> SUCCESS (stub)"],
@@ -242,11 +235,11 @@ def executor(state: GlobalState) -> dict:
 def context_flush(state: GlobalState) -> dict:
     """
     Context Flush Node (Pure Code, No LLM)
-    
+
     Role: On success — clear current_task (empty the slot) and clear last_result.
           On failure — set halt_flag; current_task and todo_list are left intact so
                        the same task will be retried after human intervention resumes the system.
-    
+
     TODO: Add RemoveMessage sweep once Executor uses real LangGraph tool calls.
     """
     task_id = state.get("current_task", {}).get("task_id", "?")
@@ -293,10 +286,10 @@ def should_continue(state: GlobalState) -> str:
 def create_graph():
     """
     Construct and compile the LangGraph StateGraph.
-    
+
     Returns:
         Compiled LangGraph application ready for invocation or LangGraph Studio.
-    
+
     Flow:
         START → supervisor → planner → dispatcher
                                             ├─(auto)──→ executor → context_flush
@@ -366,16 +359,16 @@ if __name__ == "__main__":
     print("=" * 80)
     print("LangGraph Standalone Test")
     print("=" * 80)
-    
+
     app = create_graph()
-    
+
     # Visualize graph structure
     try:
         print("\n[graph] Mermaid diagram:\n")
         print(app.get_graph().draw_mermaid())
     except Exception as e:
         print(f"[graph] Visualization unavailable: {e}")
-    
+
     # Test invocation
     initial_state: GlobalState = {
         "messages":      [HumanMessage(content="将 Part_A 放入 Tray_1")],
@@ -388,13 +381,13 @@ if __name__ == "__main__":
         "_hi_action":    None,
         "execution_log": [],
     }
-    
+
     print("\n" + "=" * 80)
     print("Running workflow...")
     print("=" * 80 + "\n")
-    
+
     final_state = app.invoke(initial_state)
-    
+
     print("\n" + "=" * 80)
     print("Final State:")
     print("=" * 80)
