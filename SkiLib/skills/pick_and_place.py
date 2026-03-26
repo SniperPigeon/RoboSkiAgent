@@ -9,14 +9,14 @@ Architecture:
 - Returns SkillResult throughout
 
 Execution sequence:
-    1. MoveJ/MoveL to pick_approach  (approach_motion, default MoveJ)
-    2. MoveL  to pick_target         (linear precise approach)
-    3. Grasp  item                   (close gripper)
-    4. MoveL  to pick_approach       (linear depart, same as approach)
-    5. MoveJ/MoveL to place_approach (transit_motion, default MoveJ)
-    6. MoveL  to place_target        (linear precise approach)
-    7. Release item                  (open gripper)
-    8. MoveL  to place_approach      (linear depart)
+    1. initial_motion to pick_approach  (initial_motion, default MoveL)
+    2. MoveL  to pick_target            (linear precise approach)
+    3. Grasp  item                      (close gripper)
+    4. MoveL  to pick_approach          (linear depart, same as approach)
+    5. transit_motion to place_approach (transit_motion, default MoveL)
+    6. MoveL  to place_target           (linear precise approach)
+    7. Release item                     (open gripper)
+    8. MoveL  to place_approach         (linear depart)
 """
 
 from typing import Dict, Optional, Tuple
@@ -59,14 +59,14 @@ class PickAndPlace(BaseSkill):
     Symbols are resolved to RoboDK Items internally via RobotContext.
 
     Sequence (execute):
-        1. approach → pick_approach   (approach_motion: MoveJ or MoveL, default MoveJ)
-        2. MoveL  → pick_target       (linear precise approach to grasp point)
-        3. Grasp    item
-        4. MoveL  → pick_approach     (linear depart with workpiece)
-        5. transit  → place_approach  (transit_motion: MoveJ or MoveL, default MoveJ)
-        6. MoveL  → place_target      (linear precise approach to place point)
-        7. Release  item
-        8. MoveL  → place_approach    (linear depart, empty gripper)
+        1. initial_motion → pick_approach  (initial_motion: MoveJ or MoveL, default MoveL)
+        2. MoveL          → pick_target    (linear precise approach to grasp point)
+        3. Grasp            item
+        4. MoveL          → pick_approach  (linear depart with workpiece)
+        5. transit_motion → place_approach (transit_motion: MoveJ or MoveL, default MoveL)
+        6. MoveL          → place_target   (linear precise approach to place point)
+        7. Release          item
+        8. MoveL          → place_approach (linear depart, empty gripper)
     """
 
     SKILL_DESCRIPTION   = "Pick an object from pick_target and place it at place_target."
@@ -87,8 +87,8 @@ class PickAndPlace(BaseSkill):
         pick_target: str,
         place_approach: str,
         place_target: str,
-        transit_motion: str = "MoveJ",
-        approach_motion: str = "MoveJ",
+        transit_motion: str = "MoveL",
+        initial_motion: str = "MoveL",
     ) -> SkillResult:
         """
         Pre-flight feasibility check.
@@ -100,9 +100,9 @@ class PickAndPlace(BaseSkill):
             place_approach:  Target name for the transit destination / depart point near place.
             place_target:    Target name for the linear-move precise place point.
             transit_motion:  Motion type for the pick_approach→place_approach segment.
-                             Must be "MoveJ" (default) or "MoveL".
-            approach_motion: Motion type for the initial move to pick_approach.
-                             Must be "MoveJ" (default) or "MoveL".
+                             Must be "MoveL" (default) or "MoveJ".
+            initial_motion:  Motion type for the initial move to pick_approach.
+                             Must be "MoveL" (default) or "MoveJ".
 
         Returns:
             SkillResult — success=False with first failing check on failure.
@@ -113,12 +113,12 @@ class PickAndPlace(BaseSkill):
             and item validity only.
         """
         # 1. Validate motion type parameters
-        if approach_motion not in _VALID_TRANSIT_MOTIONS:
+        if initial_motion not in _VALID_TRANSIT_MOTIONS:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
                 error_type="INVALID_PARAM",
-                message=f"approach_motion must be 'MoveJ' or 'MoveL', got '{approach_motion}'.",
+                message=f"initial_motion must be 'MoveJ' or 'MoveL', got '{initial_motion}'.",
             )
         if transit_motion not in _VALID_TRANSIT_MOTIONS:
             return SkillResult(
@@ -148,14 +148,14 @@ class PickAndPlace(BaseSkill):
         if err:
             return err
 
-        # 3. Check pick_approach reachable via approach_motion
-        result = self.primitives[approach_motion].check(target=pick_approach_obj)
+        # 3. Check pick_approach reachable via initial_motion
+        result = self.primitives[initial_motion].check(target=pick_approach_obj)
         if not result.success:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.PLANNING,
                 error_type=result.error_type,
-                message=f"pick_approach '{pick_approach}' not reachable via {approach_motion}: {result.message}",
+                message=f"pick_approach '{pick_approach}' not reachable via {initial_motion}: {result.message}",
                 suggestion=result.suggestion,
             )
 
@@ -220,8 +220,8 @@ class PickAndPlace(BaseSkill):
         pick_target: str,
         place_approach: str,
         place_target: str,
-        transit_motion: str = "MoveJ",
-        approach_motion: str = "MoveJ",
+        transit_motion: str = "MoveL",
+        initial_motion: str = "MoveL",
     ) -> SkillResult:
         """
         Execute pick and place.
@@ -232,19 +232,19 @@ class PickAndPlace(BaseSkill):
             pick_target:     Precise grasp point (MoveL).
             place_approach:  Approach/depart point near the place location.
             place_target:    Precise place point (MoveL).
-            transit_motion:  "MoveJ" (default) or "MoveL" for the with-workpiece transit.
-            approach_motion: "MoveJ" (default) or "MoveL" for the initial move to pick_approach.
+            transit_motion:  "MoveL" (default) or "MoveJ" for the with-workpiece transit.
+            initial_motion:  "MoveL" (default) or "MoveJ" for the initial move to pick_approach.
 
         Returns:
             SkillResult — fails fast on first primitive failure.
         """
         # Validate motion parameters first (fast-fail before any motion)
-        if approach_motion not in _VALID_TRANSIT_MOTIONS:
+        if initial_motion not in _VALID_TRANSIT_MOTIONS:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
                 error_type="INVALID_PARAM",
-                message=f"approach_motion must be 'MoveJ' or 'MoveL', got '{approach_motion}'.",
+                message=f"initial_motion must be 'MoveJ' or 'MoveL', got '{initial_motion}'.",
             )
         if transit_motion not in _VALID_TRANSIT_MOTIONS:
             return SkillResult(
@@ -275,8 +275,8 @@ class PickAndPlace(BaseSkill):
             return err
 
         # Step 1: move to pick approach point
-        logger.info("Step 1/8: %s to pick_approach '%s'...", approach_motion, pick_approach)
-        result = self.primitives[approach_motion].execute(target=pick_approach_obj)
+        logger.info("Step 1/8: %s to pick_approach '%s'...", initial_motion, pick_approach)
+        result = self.primitives[initial_motion].execute(target=pick_approach_obj)
         if not result.success:
             return result
 
@@ -340,8 +340,8 @@ class PickAndPlace(BaseSkill):
         pick_target: str,
         place_approach: str,
         place_target: str,
-        transit_motion: str = "MoveJ",
-        approach_motion: str = "MoveJ",
+        transit_motion: str = "MoveL",
+        initial_motion: str = "MoveL",
     ) -> SkillResult:
         """Run pre-flight check, then execute pick-and-place if the check passed.
 
@@ -352,18 +352,18 @@ class PickAndPlace(BaseSkill):
             place_approach:  Target name for the transit destination / depart point near place.
             place_target:    Target name for the linear-move precise place point.
             transit_motion:  Motion type for the pick_approach→place_approach segment.
-                             Must be "MoveJ" (default) or "MoveL".
-            approach_motion: Motion type for the initial move to pick_approach.
-                             Must be "MoveJ" (default) or "MoveL".
+                             Must be "MoveL" (default) or "MoveJ".
+            initial_motion:  Motion type for the initial move to pick_approach.
+                             Must be "MoveL" (default) or "MoveJ".
 
         Returns:
             SkillResult — the check result on pre-flight failure, otherwise the execute result.
         """
         if self._should_skip_check():
             logger.debug("Skipping pre-flight check (debug_skip_check=True)")
-            return self.execute(item, pick_approach, pick_target, place_approach, place_target, transit_motion, approach_motion)
-        result = self.check(item, pick_approach, pick_target, place_approach, place_target, transit_motion, approach_motion)
+            return self.execute(item, pick_approach, pick_target, place_approach, place_target, transit_motion, initial_motion)
+        result = self.check(item, pick_approach, pick_target, place_approach, place_target, transit_motion, initial_motion)
         if not result.success:
             logger.warning("Pre-flight check failed: %s", result.message)
             return result
-        return self.execute(item, pick_approach, pick_target, place_approach, place_target, transit_motion, approach_motion)
+        return self.execute(item, pick_approach, pick_target, place_approach, place_target, transit_motion, initial_motion)
