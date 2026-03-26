@@ -393,7 +393,7 @@ class BaseSkill(ABC):
 
             tools.append(StructuredTool.from_function(
                 func=_wrapper,
-                name=f"{skill_name}.{method_name}",
+                name=f"{skill_name}_{method_name}",
                 description=method.__doc__ or f"{skill_name} {method_name}",
             ))
         return tools
