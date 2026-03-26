@@ -98,6 +98,15 @@ class MoveJ(BasePrimitive):
                     self.robot.MoveJ(target, blocking=blocking)
                 finally:
                     self.robot.setPoseFrame(prev_frame)
+            elif isinstance(target, Item):
+                original_frame = self.robot.getLink(robolink.ITEM_TYPE_FRAME)
+                if not original_frame.Valid():
+                    original_frame = self.robot.Parent()
+                try:
+                    self.robot.setPoseFrame(target.Parent())
+                    self.robot.MoveJ(target, blocking=blocking)
+                finally:
+                    self.robot.setPoseFrame(original_frame)
             else:
                 self.robot.MoveJ(target, blocking=blocking)
 
@@ -175,12 +184,17 @@ class MoveL(BasePrimitive):
             # Joint values → FK gives pose in robot base frame.
             target_pose = self.robot.SolveFK(target)
         else:
-            # Item: get its pose in the world frame then express it relative to robot base.
-            target_pose = self.robot.PoseFrame().inv() * target.Pose()
+            # Item: set active frame to target's parent so MoveL_Test uses the correct reference.
+            original_frame = self.robot.getLink(robolink.ITEM_TYPE_FRAME)
+            self.robot.setPoseFrame(target.Parent())
+            target_pose = target.Pose()
 
         self.RDK.setCollisionActive(True)
         test_result = self.robot.MoveL_Test(start, target_pose)
         self.RDK.setCollisionActive(False)
+
+        if isinstance(target, Item):
+            self.robot.setPoseFrame(original_frame)  # restore after MoveL_Test
 
         if test_result == 0:
             return SkillResult(
@@ -240,6 +254,15 @@ class MoveL(BasePrimitive):
                     self.robot.MoveL(target, blocking=blocking)
                 finally:
                     self.robot.setPoseFrame(prev_frame)
+            elif isinstance(target, Item):
+                original_frame = self.robot.getLink(robolink.ITEM_TYPE_FRAME)
+                if not original_frame.Valid():
+                    original_frame = self.robot.Parent()  # 回退到 base frame
+                try:
+                    self.robot.setPoseFrame(target.Parent())
+                    self.robot.MoveL(target, blocking=blocking)
+                finally:
+                    self.robot.setPoseFrame(original_frame)  # 保证永远能恢复原始参考系
             else:
                 self.robot.MoveL(target, blocking=blocking)
 
@@ -252,7 +275,7 @@ class MoveL(BasePrimitive):
                 data={"pose": state.pose},
             )
         except Exception as e:
-            # TODO: same over-broad error_type mapping as MoveJ — see MoveJ.execute() TODO.
+            # TODO: same over-broad error_type mapping as MoveJ — see MoveJ.execute()
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
