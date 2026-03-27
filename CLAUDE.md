@@ -52,12 +52,14 @@ RoboSkiAgent/
 │   └── notebooks/                  # 实验用 Notebook，不含生产代码；验证通过后迁移至 Agent/
 │       ├── langchain_rag.ipynb     # RAG 实验
 │       ├── LangGraph.ipynb         # 早期图流转探索（已过期，保留作参考）
-│       └── graph_test.ipynb        # 当前活跃实验（2026-03-26）：
+│       └── graph_test.ipynb        # 当前活跃实验（2026-03-27）：
 │                                   #   Supervisor（create_agent + SupervisorOutput schema）✅
 │                                   #   Planner（工具调用方式，动态生成 add_<Skill>_task 工具）✅
 │                                   #   Dispatcher（纯代码槽位填充）✅
 │                                   #   executor（完整实现：直接调用 try_execute，LLM 恢复循环，_EscalateHITLException 升级）✅
 │                                   #   manual_intervention_handler / hitl_handler（行为修正完成）⚠️（仍缺 interrupt）
+│                                   #   plan_review（待实现）⏳
+│                                   #   GUI：feedback_box 已添加，handle_choice 支持 replan payload ✅
 └── SkiLib/                         # 纯技能库（无 LangGraph 依赖，可独立测试）
     ├── ARCHITECTURE.md
     ├── __init__.py
@@ -109,8 +111,22 @@ RoboSkiAgent/
 - 优势：LLM 只需会用工具，不需要记住 JSON schema；参数校验由 Pydantic args_schema 自动完成
 - 生成后必须抹除调研阶段的对话记录，防止污染下层（⚠️ 消息清理尚未实现）
 - ❌ 禁止输出模糊描述，参数必须合法
+- ~~system prompt 要求 LLM 在每个 plan 前插入一个 manual task 让操作员审批计划~~ ← 已废弃（2026-03-27）：prompt 层约束对弱模型不可靠，且操作员无法通过 manual task 纠正计划内容；审批职责移交给结构性节点 `plan_review`，`manual` 任务语义还原为"机器人做不了的人工步骤"（如手动拧紧螺栓）
 
 ### Layer 2 · 执行与清理层
+
+**PlanReview**（LangGraph interrupt，计划审批门）
+- 唯一入口：Planner 完成后，Dispatcher 启动前；图结构保证每次规划后必经此节点
+- 向操作员展示完整 `todo_list` 摘要（task_id / type / skill 或 description）
+- 操作员 actions：`approve` / `abort` / `replan`
+  - `approve`：直接进 Dispatcher 开始执行；清 `halt_flag/halt_reason`
+  - `abort`：清空 `todo_list`，进 END
+  - `replan`：携带操作员修改意见（`{"action": "replan", "feedback": "..."}`）写入 `HumanMessage`，回到 `supervisor` 重新规划
+- ✅ **结构保证**：审批由节点强制触发，与 LLM 能力无关；弱模型不会跳过审批
+- ✅ **可纠错**：`replan` 路径让操作员把修改意见送回 supervisor，比 abort + 重启更高效
+
+> [2026-03-27 设计] 替代原 Planner 在 prompt 层要求 LLM 插入 manual task 的做法。`plan_review` 节点尚未实现，待实现后更新此条目状态。
+> GUI 同步更新（2026-03-27）：`feedback_box`（`gr.Textbox`，3行）在 interrupt `options` 含 `"replan"` 时条件性显示；`handle_choice` 当 `choice == "replan"` 时将文本打包为 `{"action": "replan", "feedback": <text>}` 传给 `Command(resume=...)`。其余 choices 保持原有纯字符串传参，向后兼容。
 
 **Dispatcher**（纯代码，非 LLM）
 - ~~`todo_list.pop(0)` 提取 `current_task` 写入 Global State~~ ← 已废弃：无条件 pop 导致任务在 halt/失败时永久丢失
