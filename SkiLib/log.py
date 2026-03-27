@@ -2,11 +2,19 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import queue
 
 _LOG_LEVEL = os.environ.get("ROBOSKI_LOG_LEVEL", "INFO").upper()
 _LOG_DIR   = Path(__file__).parent.parent / "logs"
 _LOG_FILE  = _LOG_DIR / "roboski.log"
 _FMT       = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
+
+# Registry of all loggers created by get_logger(), used by attach_queue_handler()
+_registered_loggers: list[logging.Logger] = []
+_active_queue_handlers: list[logging.Handler] = []
 
 # ANSI color codes keyed by log level
 _ANSI_COLORS = {
@@ -72,4 +80,40 @@ def get_logger(name: str) -> logging.Logger:
     # Prevent the root logger from printing the same record a second time.
     logger.propagate = False
 
+    # Attach any queue handlers that were registered before this logger was created.
+    for handler in _active_queue_handlers:
+        logger.addHandler(handler)
+
+    _registered_loggers.append(logger)
     return logger
+
+
+def attach_queue_handler(q: "queue.Queue", level: str = "INFO") -> None:
+    """Attach a QueueHandler to all existing and future loggers from get_logger().
+
+    Call this once at application startup (e.g. from the Agent layer or a
+    Gradio notebook) to enable real-time log streaming without introducing
+    any LangGraph dependency into SkiLib.
+
+    Args:
+        q:     A ``queue.Queue`` instance consumed by the UI layer.
+        level: Minimum log level forwarded to the queue (default: INFO).
+
+    Usage::
+
+        import queue
+        from SkiLib.log import attach_queue_handler
+
+        log_queue = queue.Queue()
+        attach_queue_handler(log_queue)
+        # Now poll log_queue in your UI to get real-time log lines.
+    """
+    from logging.handlers import QueueHandler
+
+    handler = QueueHandler(q)
+    handler.setLevel(level)
+    _active_queue_handlers.append(handler)
+    for logger in _registered_loggers:
+        # Guard against adding duplicate handlers on repeated calls.
+        if not any(isinstance(h, QueueHandler) for h in logger.handlers):
+            logger.addHandler(handler)
