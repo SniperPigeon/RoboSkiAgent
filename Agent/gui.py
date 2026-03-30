@@ -104,6 +104,16 @@ def _check_for_interrupt(graph, config: dict, session: dict, log_lines: list[str
         return [log_text, session] + _get_button_updates(options)
 
     session["waiting"] = False
+    # Graph finished normally (no pending interrupt) — append completion notice
+    final_state = graph.get_state(config).values
+    todo_remaining = final_state.get("todo_list", [])
+    halt = final_state.get("halt_flag", False)
+    if halt:
+        log_text += "\n\n⚠️  流程因故障挂起（halt_flag=True）"
+    elif todo_remaining:
+        log_text += f"\n\n⚠️  流程结束，仍有 {len(todo_remaining)} 个任务未执行"
+    else:
+        log_text += "\n\n✅  流程正常结束，所有任务已完成"
     return [log_text, session] + _hide_buttons()
 
 

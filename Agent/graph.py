@@ -34,7 +34,11 @@ def build_graph(
 
     if checkpointer is None:
         from langgraph.checkpoint.memory import MemorySaver
-        checkpointer = MemorySaver()
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+        serde = JsonPlusSerializer(
+            allowed_msgpack_modules=[("SkiLib.base", "SkillResult"), ("SkiLib.base", "ExecutionPhase")]
+        )
+        checkpointer = MemorySaver(serde=serde)
 
     builder = StateGraph(GlobalState)
 
