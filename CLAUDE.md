@@ -22,7 +22,9 @@
 ---
 - 当发现原文档的设计有问题时或与你探讨出有问题时，应在许可后将发现更新至文档并修改原来的表述，但是不要直接替换以保留迭代过程。
 - 在规划时思考隐藏的逻辑问题，包括但不限于造成逻辑死锁的设计、兜底过多导致过度静默处理错误都应避免。
-- **禁止在 `SkiLib/` 生产代码中使用 `print()`**，一律通过 `SkiLib/log.py` 提供的 `get_logger(__name__)` 获取模块级 logger 输出。Logger 配置双 Handler（控制台 StreamHandler + 轮转文件 RotatingFileHandler），行为与 print 等价但支持级别过滤和持久化。Notebook 实验代码不受此约束。详见 Phase 5 实现计划。
+- **禁止在 `SkiLib/` 生产代码中使用 `print()`**，一律通过 `SkiLib/log.py` 提供的 `get_logger(__name__)` 获取模块级 logger 输出。Logger 配置双 Handler（控制台 StreamHandler + 轮转文件 RotatingFileHandler），行为与 print 等价但支持级别过滤和持久化。Notebook 实验代码不受此约束。`SkiLib/log.py` 已实现（2026-03-17）。
+- **实现完毕的功能必须同步更新文档**，包括 CLAUDE.md 目录结构、IMPLEMENTATION_CHECKLIST.md 对应条目、以及 ARCHITECTURE.md 中的状态标注。未更新文档的实现视为不完整。
+- **开发前必须激活虚拟环境**：运行 Notebook、执行脚本、调试 SkiLib 或启动 Agent 前，须先激活项目虚拟环境（如 `conda activate <env>` 或 `.venv\Scripts\activate`）。未激活环境直接运行可能导致依赖缺失或版本冲突，且错误现象不易排查。
 ---
 
 
@@ -41,32 +43,66 @@
 
 ## 目录结构
 
+> 最后更新：2026-03-30（Phase 6 迁移完成，Agent/ 包已生产化）
+
 ```
 RoboSkiAgent/
 ├── CLAUDE.md
-├── Agent/                          # 实验用 Notebook，不含生产代码
-│   ├── langchain_rag.ipynb
-│   └── LangGraph.ipynb
-└── SkiLib/                         # 核心库
+├── IMPLEMENTATION_CHECKLIST.md
+├── Agent/                          # Agent 编排层（生产代码）；依赖 SkiLib，单向依赖
+│   ├── __init__.py                 # 重新导出 build_graph / make_initial_state / GlobalState
+│   ├── state.py                    # GlobalState TypedDict（todo_list / current_task / halt_flag / ...）
+│   ├── llm.py                      # LLM 工厂：ROBOSKI_LLM_PROVIDER=claude（默认）/ ollama
+│   ├── graph.py                    # build_graph() / make_initial_state()；含 MemorySaver + JsonPlusSerializer
+│   ├── gui.py                      # Gradio GUI：完整 interrupt 处理（plan_review / hitl / manual）✅
+│   ├── __main__.py                 # CLI 入口：python -m Agent "<指令>"
+│   │                               #   ⚠️ 使用 graph.invoke()，遇 interrupt 节点会抛 NodeInterrupt
+│   │                               #   含人工审批的完整流程请改用 GUI
+│   ├── prompts/                    # 提示词模板（纯文本，运行时 .format() 注入）
+│   │   ├── supervisor.txt
+│   │   ├── planner.txt
+│   │   └── executor.txt
+│   ├── nodes/                      # 各节点独立模块
+│   │   ├── __init__.py
+│   │   ├── supervisor.py           # T-skills 查询 + SupervisorOutput 结构化输出
+│   │   ├── planner.py              # 动态生成 add_<Skill>_task 工具，LLM tool-call 构建 todo_list
+│   │   ├── plan_review.py          # interrupt 审批门（approve / replan / abort）
+│   │   ├── dispatcher.py           # 纯代码槽位填充；manual 任务设 halt_flag
+│   │   ├── executor.py             # try_execute + LLM 恢复循环 + _EscalateHITLException 升级
+│   │   ├── manual_handler.py       # interrupt：complete / abort
+│   │   └── hitl_handler.py         # interrupt：retry / next_task / replan / abort
+│   └── notebooks/                  # 历史实验 Notebook（参考用，核心逻辑已迁移）
+│       ├── langchain_rag.ipynb     # RAG 实验
+│       ├── LangGraph.ipynb         # 早期图流转探索（已过期）
+│       └── graph_test.ipynb        # 原始实现参考（2026-03-27，已被 Agent/ 包取代）
+└── SkiLib/                         # 纯技能库（无 LangGraph 依赖，可独立测试）
     ├── ARCHITECTURE.md
     ├── __init__.py
-    ├── base.py                     # 核心抽象：BasePrimitive / BaseSkill / SkillResult
+    ├── base.py                     # 核心抽象：BasePrimitive / BaseSkill / SkillResult / as_tools() / TOOL_METHODS
     ├── robotcontext.py             # 运行时单例：RobotContext / PrimitiveRegistry
-    ├── main.py
+    ├── registry.py                 # SkillRegistry 单例：反射扫描 skills/，实例化 BaseSkill，暴露 get_tools()
+    ├── log.py                      # Logger 工厂：get_logger(__name__)，双 Handler（控制台 + 轮转文件）
+    ├── main.py                     # 技能库调试入口（非生产，独立于 Agent 编排）
+    ├── graph.py                    # ⚠️ 错位文件：含 LangGraph 依赖，违反 SkiLib 无 LangGraph 约束；
+    │                               #   待迁移至 Agent/notebooks/ 或正式采纳后移入 Agent/graph.py
     ├── RDK_Test.py
     ├── utils.py
+    ├── metatools/                  # T-skills：Supervisor 使用的只读场景查询工具（无坐标，符号名）
+    │   ├── __init__.py
+    │   └── informative.py          # list_targets / list_objects / list_tools / check_item_exists / get_gripper_state
     ├── doc/
     │   ├── DEV_NOTES_SkillRegistry.md
     │   ├── IK_SOLVER_USAGE.md
     │   └── IMPLEMENTATION_PLAN_SkillRegistry.md
-    ├── examples/
     ├── primitives/
-    │   └── motion.py               # MoveJ (完整) / MoveL (execute 完整, check 待实现)
+    │   ├── motion.py               # MoveJ (完整) / MoveL (完整，含 check())
+    │   └── gripper.py              # Grasp (完整，仿真) / Release (完整，仿真)；参数 expected_item
     └── skills/
-        └── pick_and_place.py
+        ├── pick_and_place.py       # PickAndPlace (完整)：8步序列，显式接近点，initial_motion/transit_motion（均默认 MoveL）
+        └── dummy_skills.py         # 测试桩（非生产）
 ```
 
-**Agent/ 与 SkiLib/ 的关系**：Agent Notebook 通过导入 SkiLib 调用技能库，本身不包含任何业务逻辑实现。
+**Agent/ 与 SkiLib/ 的关系**：`Agent/` 是编排层，通过 `from SkiLib.xxx import ...` 调用技能库。依赖方向单向：`Agent → SkiLib`，SkiLib 本身不依赖 LangGraph。
 
 ---
 
@@ -82,12 +118,36 @@ RoboSkiAgent/
 - ❌ 禁止调用任何底层硬件 API
 - ✅ 世界里只有符号和 ID（如 `Target_A`、`Tool_Gripper`）
 
+> [2026-03-26 实现] `graph_test.ipynb` 中已用 `create_agent` + `SupervisorOutput` 结构化 schema 实现真实 LLM 调用。工具集来自 `SkiLib/metatools/informative.py`（T-skills）。可用技能列表由代码注入 system prompt，LLM 不填写。
+
 **Planner**
-- 使用强制结构化输出生成 `todo_list` JSON 任务队列
-- 生成后必须抹除调研阶段的对话记录，防止污染下层
-- ❌ 禁止输出模糊描述，输出必须是合法 JSON
+- ~~使用强制结构化输出生成 `todo_list` JSON 任务队列~~ ← 原设计
+- ✅ **实际采用**（2026-03-26）：工具调用方式 — 为每个已注册 Skill 动态生成 `add_<SkillName>_task` 工具（复用 `try_execute` 的 args_schema），LLM 通过逐一调用工具构建计划，无需直接输出 JSON
+- 优势：LLM 只需会用工具，不需要记住 JSON schema；参数校验由 Pydantic args_schema 自动完成
+- 生成后必须抹除调研阶段的对话记录，防止污染下层（⚠️ 消息清理尚未实现）
+- ❌ 禁止输出模糊描述，参数必须合法
+- ~~system prompt 要求 LLM 在每个 plan 前插入一个 manual task 让操作员审批计划~~ ← 已废弃（2026-03-27）：prompt 层约束对弱模型不可靠，且操作员无法通过 manual task 纠正计划内容；审批职责移交给结构性节点 `plan_review`，`manual` 任务语义还原为"机器人做不了的人工步骤"（如手动拧紧螺栓）
 
 ### Layer 2 · 执行与清理层
+
+**PlanReview**（LangGraph interrupt，计划审批门）
+- 唯一入口：Planner 完成后，Dispatcher 启动前；图结构保证每次规划后必经此节点
+- 向操作员展示完整 `todo_list` 摘要（task_id / type / skill 或 description）
+- 操作员 actions：`approve` / `abort` / `replan`
+  - `approve`：直接进 Dispatcher 开始执行；清 `halt_flag/halt_reason`
+  - `abort`：清空 `todo_list`，进 END
+  - `replan`：携带操作员修改意见（`{"action": "replan", "feedback": "..."}`）写入 `HumanMessage`，回到 `supervisor` 重新规划
+- ✅ **结构保证**：审批由节点强制触发，与 LLM 能力无关；弱模型不会跳过审批
+- ✅ **可纠错**：`replan` 路径让操作员把修改意见送回 supervisor，比 abort + 重启更高效
+
+> [2026-03-27 实现] `graph_test.ipynb` 中已实现：
+> - interrupt 展示完整 `todo_list` 摘要（task_id / type / skill 或 description）
+> - `isinstance(result, dict)` 解包：approve/abort 传纯字符串，replan 传 `{"action": "replan", "feedback": "..."}`
+> - replan 路径：写入 `HumanMessage` + 清空 `todo_list`，回 supervisor 重规划
+> - abort 路径：清空 `todo_list`，路由到 END
+> - `plan_review_action` 字段已加入 `GlobalState`
+> - ⚠️ Planner system prompt 仍残留"在计划前插入 manual task"规则，会导致 approve 后弹出多余的 complete/abort，待删除该条规则
+> GUI（2026-03-27）：`feedback_box` 改为常驻显示（避免 Gradio streaming 与 visible 更新的时序冲突）；`handle_choice` 当 `choice == "replan"` 时将文本打包为 `{"action": "replan", "feedback": <text>}` 传给 `Command(resume=...)`；`_check_for_interrupt` 修复 `IndexError`（API 异常时 `state.next` 非空但 `interrupts` 为空 tuple）。
 
 **Dispatcher**（纯代码，非 LLM）
 - ~~`todo_list.pop(0)` 提取 `current_task` 写入 Global State~~ ← 已废弃：无条件 pop 导致任务在 halt/失败时永久丢失
@@ -98,11 +158,24 @@ RoboSkiAgent/
 > [2026-03-13 更新] 新增 manual 任务路径：
 - ✅ **manual 任务**：填入 `type="manual"` 的任务时，同时设 `halt_flag=True`、`halt_reason="MANUAL_TASK"`，由 `after_dispatcher` 条件边路由到 `human_intervention`，绕过 Executor
 
+> [2026-03-25 更新] `human_intervention` 已拆分为两个节点，manual 路径目标节点改为 `manual_task_handler`：
+- ✅ **manual 任务**：填入后由 `after_dispatcher` 路由到 `manual_task_handler`（不再是 `human_intervention`）
+
+> [2026-03-26 更新] `graph_test.ipynb` 框架重构，Dispatcher 路由条件函数改名为 `task_router`（返回 `"auto"` / `"manual"` / `"END"`）；节点命名调整：
+- `manual_task_handler` → `manual_intervention_handler`
+- `task_failure_handler` → `hitl_handler`（新增 `replan` 路径，可回到 Supervisor 重规划）
+
 **Executor**
 - 只关注当前 `current_task`，动态加载 P/R/E-skills 完成单步物理动作
 - ✅ 执行结果写入 `last_result`（数据用途），Context Flush 据此决定成功/失败路径
 - ❌ 禁止解析 YAML 规范
 - ❌ 禁止思考业务逻辑（"为什么要抓这个零件"）
+
+> [2026-03-26 更新] `graph_test.ipynb` Executor 节点完整实现：
+- 直接调用 `skill_registry[skill_name].try_execute(**params)` 执行任务
+- 失败时启动 LLM 恢复循环（ReAct 内循环，尝试自愈；循环内 `needs_hilp=False`）
+- 放弃时抛出 `_EscalateHITLException(error_type, reason, suggestion)`，携带结构化失败诊断
+- 所有路径均将 `SkillResult` 对象写入 `last_result`（类型已由 `Optional[dict]` 升为 `Optional[SkillResult]`）
 
 **Context Flush**（纯代码）
 - ✅ **成功时**：清空 `current_task = {}`（腾出槽位），清空 `last_result = None`
@@ -115,14 +188,40 @@ RoboSkiAgent/
 - ✅ **失败且 `last_result.needs_hilp=False`**：理论上不应出现（Executor 未放弃时不应退出节点）；若出现，保守 fallthrough 至 halt，不允许静默跳过失败任务
 - ✅ **成功时**：额外清空 `halt_reason=None`
 
-**HumanIntervention**（LangGraph interrupt，新增节点）
-- 接收两类入口：
-  - `halt_reason="TASK_FAILURE"`：Executor 无法自愈，操作员选择 `retry` 或 `abort`
-  - `halt_reason="MANUAL_TASK"`：计划内人工任务，操作员选择 `complete` 或 `abort`
-- `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务
+> [2026-03-26 更新] `graph_test.ipynb` 中 Context Flush **不作为独立节点**，其路由逻辑合并为 `executor` 的条件出边函数 `post_task_router`（返回 `"dispatcher"` / `"hitl_handler"` / `"END"`）。消息清理（`RemoveMessage`）尚未实现，待 Phase 4 补充。
+
+~~**HumanIntervention**（LangGraph interrupt，新增节点）~~
+~~- 接收两类入口：~~
+~~  - `halt_reason="TASK_FAILURE"`：Executor 无法自愈，操作员选择 `retry` 或 `abort`~~
+~~  - `halt_reason="MANUAL_TASK"`：计划内人工任务，操作员选择 `complete` 或 `abort`~~
+~~- `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务~~
+~~- `complete`：清除 `halt_flag/halt_reason`，清空 `current_task` → Dispatcher 推进到下一任务~~
+~~- `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END~~
+~~- ❌ `retry` 对 `MANUAL_TASK` 非法（会导致 Executor 找不到 skill 进入无限 HITL 循环），节点内强制降级为 `abort`~~
+
+> [2026-03-25 更新] 单节点设计有缺陷：两种入口的合法 actions 不同，靠运行时 guard 防御非法组合（`retry` on `MANUAL_TASK`）是设计异味。拆分为两个独立节点，非法组合从结构上消失。
+
+**ManualTaskHandler**（LangGraph interrupt，计划内人工步骤）
+- 唯一入口：`after_dispatcher` 路由 `type="manual"` 任务
+- 操作员 actions：`complete` / `abort`（不提供 `retry`，结构上排除非法组合）
 - `complete`：清除 `halt_flag/halt_reason`，清空 `current_task` → Dispatcher 推进到下一任务
 - `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
-- ❌ `retry` 对 `MANUAL_TASK` 非法（会导致 Executor 找不到 skill 进入无限 HILP 循环），节点内强制降级为 `abort`
+
+> [2026-03-26 修正] `graph_test.ipynb` 实现细节修正：
+- `current_task` 清空值修正为 `{}` （原误写为 `None`，与执行槽语义不符）
+- `halt_flag=False` / `halt_reason=None` 两处字段清零均已补齐
+
+**TaskFailureHandler**（LangGraph interrupt，执行故障恢复）
+- 唯一入口：`context_flush` 失败路径（`needs_hilp=True`）
+- 操作员 actions：`retry` / `abort`（不提供 `complete`，语义上不合理）
+- `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务
+- `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
+
+> [2026-03-26 修正] `graph_test.ipynb` hitl_handler 实现细节修正：
+- 节点入口打印 `last_result` 诊断信息（`error_type`、`suggestion`）
+- **所有路径**（`retry` / `next_task` / `replan` / `abort`）均显式清 `halt_flag=False`；原部分路径遗漏
+- `next_task` / `abort` 路径中 `current_task` 清空值修正为 `{}` （原误写为 `None`）
+- `replan` 路径同样清 `halt_flag/halt_reason`，清空 `current_task`，回到 `supervisor`
 
 ---
 
@@ -134,18 +233,36 @@ class GlobalState(TypedDict):
     current_task: dict           # 执行槽：{} = 空闲，{...} = 执行中或失败保留
     robot_state: RobotState      # 当前机器人位姿、关节角、夹爪状态
     halt_flag: bool              # True = 系统已挂起，等待人工介入
-    last_result: Optional[dict]  # Executor 写入的结果数据（非路由信号）
+    last_result: Optional[SkillResult]  # Executor 写入的结果数据（非路由信号）；原 Optional[dict]，2026-03-26 升为 SkillResult
     execution_log: list[str]     # 极简状态上报，由 Context Flush 写入
     messages: list[BaseMessage]  # LangGraph 消息列表
 ```
+
+> [2026-03-26 设计决策] **messages / execution_log 职责分离**（Gradio 接入 + HITL interrupt 前置条件）
+> - **`execution_log`**：唯一展示渠道。所有节点（supervisor / planner / executor / hitl_handler / manual_intervention_handler）均写入，格式统一 `"[节点名] 内容"`；不参与 LLM 推理，Gradio 订阅此字段。
+> - **`messages`**：职责收窄为 LLM 推理链。supervisor 读取上下文；各节点禁止向此字段追加状态摘要 AIMessage（否则 LLM 每轮都会看到越来越多的执行噪音）。
+> - **例外**：hitl_handler `replan` 路径写入 `HumanMessage` 触发 supervisor 重规划——这是 LLM 推理输入，不是展示日志，保留此行为。
+> - **待实现**：`graph_test.ipynb` 中 executor/planner 双写 messages 的冗余 AIMessage 待删除（见 Checklist 3.5.7）。
 
 > [2026-03-13 更新] 新增两个字段：
 ```python
 class GlobalState(TypedDict):
     # ... 原有字段不变 ...
-    halt_reason: Optional[str]   # "TASK_FAILURE" | "MANUAL_TASK" | None；HumanIntervention 节点读取以展示正确提示
-    _hi_action:  Optional[str]   # 内部路由字段：human_intervention 写入，after_human_intervention 读取，不对外暴露
+    halt_reason: Optional[str]   # "TASK_FAILURE" | "MANUAL_TASK" | None；诊断用，节点拆分后不再作路由信号
+    _hi_action:  Optional[str]   # 内部路由字段：manual_task_handler / task_failure_handler 写入，
+                                 #   after_manual_task / after_task_failure 读取，不对外暴露
 ```
+
+> [2026-03-26 更新] `graph_test.ipynb` 框架重构，`_hi_action` 被两个独立字段替代：
+```python
+class GlobalState(TypedDict):
+    # ... 原有字段不变（含 halt_reason）...
+    intervention_action: Optional[str]  # manual_intervention_handler 写入："complete" | "abort"
+                                        # manual_intervention_router 读取；不跨节点使用
+    hitl_command: Optional[str]         # hitl_handler 写入："retry" | "next_task" | "replan" | "abort"
+                                        # hitl_router 读取；不跨节点使用
+```
+> `replan` 是新增路径：hitl_handler 可发 `"replan"` → 路由回 `supervisor` 重新规划整个序列（原 CLAUDE.md 未包含此选项）
 
 **todo_list 任务格式（新增 `type` 字段）：**
 ```python
@@ -188,7 +305,7 @@ class SkillResult:
 class SkillResult:
     # ... 原有字段不变 ...
     needs_hilp: bool = True
-    # True（默认）= Executor 已放弃，Context Flush 应触发 HILP
+    # True（默认）= Executor 已放弃，Context Flush 应触发 HITL
     # False       = Executor 内部 ReAct 仍在尝试恢复，此状态不应从 Executor 节点输出；
     #               若 Context Flush 意外收到 success=False + needs_hilp=False，
     #               保守处理为 needs_hilp=True（防止静默跳过失败任务）
@@ -329,4 +446,4 @@ Supervisor 遇到规范描述模糊时，必须调用 `request_human_interventio
 2. **手脚不看业务** — Executor 只接受参数指令，不解析 YAML，不理解"为什么"
 3. **错误必须具身化** — 底层物理错误必须经 `SkillResult` 翻译，禁止裸露 traceback
 4. **流转必须确定性** — 任务调度由 Dispatcher 纯代码掌控，LLM 只负责推理
-5. **宁挂起不幻觉** — 遇到能力边界触发 HILP，禁止幻觉出不存在的工具或动作
+5. **宁挂起不幻觉** — 遇到能力边界触发 HITL，禁止幻觉出不存在的工具或动作
