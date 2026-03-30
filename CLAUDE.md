@@ -24,6 +24,7 @@
 - 在规划时思考隐藏的逻辑问题，包括但不限于造成逻辑死锁的设计、兜底过多导致过度静默处理错误都应避免。
 - **禁止在 `SkiLib/` 生产代码中使用 `print()`**，一律通过 `SkiLib/log.py` 提供的 `get_logger(__name__)` 获取模块级 logger 输出。Logger 配置双 Handler（控制台 StreamHandler + 轮转文件 RotatingFileHandler），行为与 print 等价但支持级别过滤和持久化。Notebook 实验代码不受此约束。`SkiLib/log.py` 已实现（2026-03-17）。
 - **实现完毕的功能必须同步更新文档**，包括 CLAUDE.md 目录结构、IMPLEMENTATION_CHECKLIST.md 对应条目、以及 ARCHITECTURE.md 中的状态标注。未更新文档的实现视为不完整。
+- **开发前必须激活虚拟环境**：运行 Notebook、执行脚本、调试 SkiLib 或启动 Agent 前，须先激活项目虚拟环境（如 `conda activate <env>` 或 `.venv\Scripts\activate`）。未激活环境直接运行可能导致依赖缺失或版本冲突，且错误现象不易排查。
 ---
 
 
@@ -55,11 +56,13 @@ RoboSkiAgent/
 │       └── graph_test.ipynb        # 当前活跃实验（2026-03-27）：
 │                                   #   Supervisor（create_agent + SupervisorOutput schema）✅
 │                                   #   Planner（工具调用方式，动态生成 add_<Skill>_task 工具）✅
+│                                   #     ⚠️ system prompt 仍残留"在计划前插入 manual task"规则，待删除
+│                                   #   plan_review（interrupt 结构审批门，approve/replan/abort）✅
 │                                   #   Dispatcher（纯代码槽位填充）✅
 │                                   #   executor（完整实现：直接调用 try_execute，LLM 恢复循环，_EscalateHITLException 升级）✅
 │                                   #   manual_intervention_handler / hitl_handler（行为修正完成）⚠️（仍缺 interrupt）
-│                                   #   plan_review（待实现）⏳
-│                                   #   GUI：feedback_box 已添加，handle_choice 支持 replan payload ✅
+│                                   #   GUI：feedback_box 常驻显示，handle_choice 支持 replan payload，
+│                                   #         _check_for_interrupt 修复 IndexError（API 异常时 interrupts 为空）✅
 └── SkiLib/                         # 纯技能库（无 LangGraph 依赖，可独立测试）
     ├── ARCHITECTURE.md
     ├── __init__.py
@@ -125,8 +128,14 @@ RoboSkiAgent/
 - ✅ **结构保证**：审批由节点强制触发，与 LLM 能力无关；弱模型不会跳过审批
 - ✅ **可纠错**：`replan` 路径让操作员把修改意见送回 supervisor，比 abort + 重启更高效
 
-> [2026-03-27 设计] 替代原 Planner 在 prompt 层要求 LLM 插入 manual task 的做法。`plan_review` 节点尚未实现，待实现后更新此条目状态。
-> GUI 同步更新（2026-03-27）：`feedback_box`（`gr.Textbox`，3行）在 interrupt `options` 含 `"replan"` 时条件性显示；`handle_choice` 当 `choice == "replan"` 时将文本打包为 `{"action": "replan", "feedback": <text>}` 传给 `Command(resume=...)`。其余 choices 保持原有纯字符串传参，向后兼容。
+> [2026-03-27 实现] `graph_test.ipynb` 中已实现：
+> - interrupt 展示完整 `todo_list` 摘要（task_id / type / skill 或 description）
+> - `isinstance(result, dict)` 解包：approve/abort 传纯字符串，replan 传 `{"action": "replan", "feedback": "..."}`
+> - replan 路径：写入 `HumanMessage` + 清空 `todo_list`，回 supervisor 重规划
+> - abort 路径：清空 `todo_list`，路由到 END
+> - `plan_review_action` 字段已加入 `GlobalState`
+> - ⚠️ Planner system prompt 仍残留"在计划前插入 manual task"规则，会导致 approve 后弹出多余的 complete/abort，待删除该条规则
+> GUI（2026-03-27）：`feedback_box` 改为常驻显示（避免 Gradio streaming 与 visible 更新的时序冲突）；`handle_choice` 当 `choice == "replan"` 时将文本打包为 `{"action": "replan", "feedback": <text>}` 传给 `Command(resume=...)`；`_check_for_interrupt` 修复 `IndexError`（API 异常时 `state.next` 非空但 `interrupts` 为空 tuple）。
 
 **Dispatcher**（纯代码，非 LLM）
 - ~~`todo_list.pop(0)` 提取 `current_task` 写入 Global State~~ ← 已废弃：无条件 pop 导致任务在 halt/失败时永久丢失
