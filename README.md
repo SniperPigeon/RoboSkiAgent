@@ -124,7 +124,7 @@ Opens a Gradio interface at `http://localhost:7860`. Type an assembly instructio
 ### CLI (limited)
 
 ```bash
-python -m Agent "把 Part_A_1 放到 Tray_1_Place"
+python -m Agent "Put first part A to target, then place B on it."
 ```
 
 > **⚠️ CLI limitation:** The CLI uses `graph.invoke()` which raises `NodeInterrupt` when the graph hits any `interrupt()` node (`plan_review`, `hitl_handler`, `manual_intervention_handler`). Until a streaming + resume loop is implemented in `__main__.py`, **the CLI cannot complete flows that require human approval**. Use the GUI for end-to-end runs.
@@ -132,7 +132,7 @@ python -m Agent "把 Part_A_1 放到 Tray_1_Place"
 Add `--skip-check` to bypass IK/collision pre-checks in simulation:
 
 ```bash
-python -m Agent "把 Part_A_1 放到 Tray_1_Place" --skip-check
+python -m Agent "Put first part A to target, then place B on it." --skip-check
 ```
 
 ## Logging
