@@ -43,26 +43,38 @@
 
 ## 目录结构
 
+> 最后更新：2026-03-30（Phase 6 迁移完成，Agent/ 包已生产化）
+
 ```
 RoboSkiAgent/
 ├── CLAUDE.md
 ├── IMPLEMENTATION_CHECKLIST.md
 ├── Agent/                          # Agent 编排层（生产代码）；依赖 SkiLib，单向依赖
-│   ├── __init__.py
-│   ├── graph.py                    # LangGraph 状态机：GlobalState / 节点 / 路由条件边（待正式实现）
-│   └── notebooks/                  # 实验用 Notebook，不含生产代码；验证通过后迁移至 Agent/
+│   ├── __init__.py                 # 重新导出 build_graph / make_initial_state / GlobalState
+│   ├── state.py                    # GlobalState TypedDict（todo_list / current_task / halt_flag / ...）
+│   ├── llm.py                      # LLM 工厂：ROBOSKI_LLM_PROVIDER=claude（默认）/ ollama
+│   ├── graph.py                    # build_graph() / make_initial_state()；含 MemorySaver + JsonPlusSerializer
+│   ├── gui.py                      # Gradio GUI：完整 interrupt 处理（plan_review / hitl / manual）✅
+│   ├── __main__.py                 # CLI 入口：python -m Agent "<指令>"
+│   │                               #   ⚠️ 使用 graph.invoke()，遇 interrupt 节点会抛 NodeInterrupt
+│   │                               #   含人工审批的完整流程请改用 GUI
+│   ├── prompts/                    # 提示词模板（纯文本，运行时 .format() 注入）
+│   │   ├── supervisor.txt
+│   │   ├── planner.txt
+│   │   └── executor.txt
+│   ├── nodes/                      # 各节点独立模块
+│   │   ├── __init__.py
+│   │   ├── supervisor.py           # T-skills 查询 + SupervisorOutput 结构化输出
+│   │   ├── planner.py              # 动态生成 add_<Skill>_task 工具，LLM tool-call 构建 todo_list
+│   │   ├── plan_review.py          # interrupt 审批门（approve / replan / abort）
+│   │   ├── dispatcher.py           # 纯代码槽位填充；manual 任务设 halt_flag
+│   │   ├── executor.py             # try_execute + LLM 恢复循环 + _EscalateHITLException 升级
+│   │   ├── manual_handler.py       # interrupt：complete / abort
+│   │   └── hitl_handler.py         # interrupt：retry / next_task / replan / abort
+│   └── notebooks/                  # 历史实验 Notebook（参考用，核心逻辑已迁移）
 │       ├── langchain_rag.ipynb     # RAG 实验
-│       ├── LangGraph.ipynb         # 早期图流转探索（已过期，保留作参考）
-│       └── graph_test.ipynb        # 当前活跃实验（2026-03-27）：
-│                                   #   Supervisor（create_agent + SupervisorOutput schema）✅
-│                                   #   Planner（工具调用方式，动态生成 add_<Skill>_task 工具）✅
-│                                   #     ⚠️ system prompt 仍残留"在计划前插入 manual task"规则，待删除
-│                                   #   plan_review（interrupt 结构审批门，approve/replan/abort）✅
-│                                   #   Dispatcher（纯代码槽位填充）✅
-│                                   #   executor（完整实现：直接调用 try_execute，LLM 恢复循环，_EscalateHITLException 升级）✅
-│                                   #   manual_intervention_handler / hitl_handler（行为修正完成）⚠️（仍缺 interrupt）
-│                                   #   GUI：feedback_box 常驻显示，handle_choice 支持 replan payload，
-│                                   #         _check_for_interrupt 修复 IndexError（API 异常时 interrupts 为空）✅
+│       ├── LangGraph.ipynb         # 早期图流转探索（已过期）
+│       └── graph_test.ipynb        # 原始实现参考（2026-03-27，已被 Agent/ 包取代）
 └── SkiLib/                         # 纯技能库（无 LangGraph 依赖，可独立测试）
     ├── ARCHITECTURE.md
     ├── __init__.py
