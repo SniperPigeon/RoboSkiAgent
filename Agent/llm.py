@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def create_llm(provider: str = None, **kwargs) -> BaseChatModel:
+def create_llm(provider: str = None, **kwargs) -> BaseChatModel: #typ: ignore
     """LLM factory. Provider is read from ROBOSKI_LLM_PROVIDER env var (default: claude)."""
     provider = provider or os.getenv("ROBOSKI_LLM_PROVIDER", "claude")
 
