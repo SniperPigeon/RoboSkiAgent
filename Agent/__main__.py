@@ -1,4 +1,4 @@
-"""CLI entry point: python -m Agent "把 Part_A_1 放到目标点"."""
+"""CLI entry point: python -m Agent "Place Part_A_1 at the target location"."""
 import argparse
 import os
 import sys
