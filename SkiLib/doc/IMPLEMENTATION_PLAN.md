@@ -69,7 +69,7 @@ LangGraph `app.invoke()` 到达 END 只是**内层循环结束**，不影响 Rob
 ```
 外层循环（main.py）          维持 RobotContext，接收用户指令，等待下一条
   └─ 内层循环（invoke）      一次完整的 Supervisor→Planner→Dispatcher×N→END
-       └─ HILP（interrupt）  内层内部暂停，同一 thread_id 恢复，不退出到外层
+       └─ HITL（interrupt）  内层内部暂停，同一 thread_id 恢复，不退出到外层
 ```
 
 `main.py` 是常驻进程，程序在每轮 agent 结束后继续等待指令，而不是退出。
@@ -91,7 +91,7 @@ def build_initial_state(context: RobotContext, instruction: str) -> GlobalState:
     }
 ```
 
-### 决策 6：HILP 使用 LangGraph interrupt() + MemorySaver
+### 决策 6：HITL 使用 LangGraph interrupt() + MemorySaver
 
 ```python
 # human_intervention 节点内
@@ -146,14 +146,14 @@ def resume(self) -> SkillResult: ...
 
 ### Phase 1 · 最小可运行系统
 
-**目标**：硬编码 todo_list，完整跑通 Dispatcher → Executor → Context Flush → HILP 循环，main.py 持续等待。
+**目标**：硬编码 todo_list，完整跑通 Dispatcher → Executor → Context Flush → HITL 循环，main.py 持续等待。
 
 #### 1.1 main.py 外层循环 + Checkpointer
 - **文件**：`SkiLib/main.py`（重写）
 - 初始化 `RobotContext()`（一次）
 - `create_graph(checkpointer=MemorySaver())` 编译图
 - `while True` 接收用户指令，构造 `initial_state`，`invoke()` 调用
-- HILP 恢复：捕获 `GraphInterrupt`，提示操作员，`invoke(Command(resume=...))`
+- HITL 恢复：捕获 `GraphInterrupt`，提示操作员，`invoke(Command(resume=...))`
 
 ```python
 def main():
@@ -195,7 +195,7 @@ def main():
 - 参考同文件 `MoveJ.check()` 实现，调用 `MoveL_Test()` 进行碰撞检测
 - 返回 `SkillResult(execution_phase=ExecutionPhase.PLANNING, ...)`
 
-**验证**：`python SkiLib/main.py`，输入任意指令 → 硬编码 todo_list 在 RoboDK 仿真中真实执行 → 触发失败时 HILP 暂停 → 输入 resume 后继续 → 输入新指令程序继续等待。
+**验证**：`python SkiLib/main.py`，输入任意指令 → 硬编码 todo_list 在 RoboDK 仿真中真实执行 → 触发失败时 HITL 暂停 → 输入 resume 后继续 → 输入新指令程序继续等待。
 
 ---
 
@@ -272,7 +272,7 @@ def main():
 | 文件 | 状态 | 主要修改内容 |
 |------|------|------------|
 | `SkiLib/base.py` | 修改 | 新增 `@require_robot_active` 装饰器 |
-| `SkiLib/main.py` | 重写 | 外层循环 + RobotContext 保活 + HILP 交互 |
+| `SkiLib/main.py` | 重写 | 外层循环 + RobotContext 保活 + HITL 交互 |
 | `SkiLib/graph.py` | 修改 | 替换所有 stub 节点；接受 checkpointer；新增 human_intervention |
 | `SkiLib/registry.py` | **新建** | SkillRegistry 单例 |
 | `SkiLib/decorators.py` | **新建** | `@skill` 装饰器 |
@@ -312,7 +312,7 @@ Phase 3 (Supervisor + RemoveMessage) ←───
 
 ## 验证方式（端到端）
 
-1. **Phase 0-1**：`python SkiLib/main.py` → 输入指令 → 硬编码任务在 RoboDK 仿真中执行 → 触发失败 → HILP 暂停 → 输入 resume → 继续 → 程序等待下一条指令
+1. **Phase 0-1**：`python SkiLib/main.py` → 输入指令 → 硬编码任务在 RoboDK 仿真中执行 → 触发失败 → HITL 暂停 → 输入 resume → 继续 → 程序等待下一条指令
 2. **Phase 2**：输入 `"将 Part_A 放入 Tray_1"` → Planner 生成合法 JSON → Executor 执行
 3. **Phase 3**：输入模糊指令 → Supervisor 查询 RoboDK 树 → 消歧义 → Planner 生成计划
 4. **Phase 4**：完整 PickAndPlace 在 RoboDK 仿真中抓取并放置零件

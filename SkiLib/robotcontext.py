@@ -63,16 +63,74 @@ class RobotContext:
         # Currently held item in the gripper; set by Grasp.execute(), cleared by Release.execute()
         self.held_item: Optional[robolink.Item] = None
 
+        # Debug flag: when True, BaseSkill._should_skip_check() returns True so
+        # try_execute() calls execute() directly without running check().
+        # For simulation / unit-test environments only — never set True in production.
+        self.debug_skip_check: bool = False
+
         # Auto-initialize primitive registry
         self.primitive_registry = PrimitiveRegistry(self.robot, self.RDK)
+
+        # SkillRegistry eager init — must follow PrimitiveRegistry so primitives are ready
+        from SkiLib.registry import SkillRegistry  # local import avoids circular dependency
+        SkillRegistry().set_robot_context(self)
+
         self._initialized = True
-    
+
     @property
     def primitives(self) -> Dict[str, 'BasePrimitive']:
         """Quick access to primitive instances"""
         return self.primitive_registry.get_all()
-    
-    # TODO Provide all variables in RoboDK Tree for LLM to access. But not sure where to put those.
+
+    def get_current_state(self):
+        """
+        Capture current robot state snapshot.
+        Returns RobotState with None joints/pose if the robot is unreachable.
+        Suitable for initialising GlobalState.robot_state.
+        """
+        from SkiLib.base import RobotState  # local import avoids circular dependency
+        try:
+            return RobotState(
+                joints=list(self.robot.Joints()),
+                pose=self.robot.Pose(),
+                gripper_state="UNKNOWN",
+            )
+        except Exception:
+            return RobotState(gripper_state="UNKNOWN")
+
+    @property
+    def is_simulation(self) -> bool:
+        """True when RoboDK is running in simulation mode (not connected to real hardware)."""
+        return self.RDK.RunMode() == robolink.RUNMODE_SIMULATE
+
+    def get_gripper_state(self) -> dict:
+        """
+        Return current gripper state as a symbol-only dict (no coordinates).
+
+        Simulation: infers grasped objects from RoboDK parent-child relationships.
+        Real robot: reads digital IO signal from gripper sensor.
+
+        Returns:
+            {
+                "active_tool": str,       # name of the currently active tool
+                "grasped": list[str],     # names of objects currently held by the gripper
+            }
+        """
+        tool = self.robot.getLink(robolink.ITEM_TYPE_TOOL)
+        if not tool.Valid():
+            return {"active_tool": None, "grasped": []}
+
+        if self.is_simulation:
+            grasped = [c.Name() for c in tool.Childs()
+                       if c.Type() == robolink.ITEM_TYPE_OBJECT]
+        else:
+            # TODO: replace with actual IO pin from config when real-robot support is added
+            raise NotImplementedError(
+                "Real-robot gripper state requires IO configuration. "
+                "Set self.config.gripper_sensor_pin and implement DI read."
+            )
+
+        return {"active_tool": tool.Name(), "grasped": grasped}
 
 
 # ============= Primitive Registry (Singleton) =============
