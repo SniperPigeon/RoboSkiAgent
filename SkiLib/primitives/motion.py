@@ -257,12 +257,12 @@ class MoveL(BasePrimitive):
             elif isinstance(target, Item):
                 original_frame = self.robot.getLink(robolink.ITEM_TYPE_FRAME)
                 if not original_frame.Valid():
-                    original_frame = self.robot.Parent()  # 回退到 base frame
+                    original_frame = self.robot.Parent()  # fall back to base frame
                 try:
                     self.robot.setPoseFrame(target.Parent())
                     self.robot.MoveL(target, blocking=blocking)
                 finally:
-                    self.robot.setPoseFrame(original_frame)  # 保证永远能恢复原始参考系
+                    self.robot.setPoseFrame(original_frame)  # always restore original reference frame
             else:
                 self.robot.MoveL(target, blocking=blocking)
 

@@ -100,7 +100,7 @@ def _check_for_interrupt(graph, config: dict, session: dict, log_lines: list[str
         options      = interrupt_val.get("options", [])
         description  = interrupt_val.get("description", "")
         session["waiting"] = True
-        log_text += f"\n[ 任务 ] {description}\n⏸ 等待人工确认..."
+        log_text += f"\n[ Task ] {description}\n⏸ Waiting for human confirmation..."
         return [log_text, session] + _get_button_updates(options)
 
     session["waiting"] = False
@@ -109,11 +109,11 @@ def _check_for_interrupt(graph, config: dict, session: dict, log_lines: list[str
     todo_remaining = final_state.get("todo_list", [])
     halt = final_state.get("halt_flag", False)
     if halt:
-        log_text += "\n\n⚠️  流程因故障挂起（halt_flag=True）"
+        log_text += "\n\n⚠️  Flow halted due to failure (halt_flag=True)"
     elif todo_remaining:
-        log_text += f"\n\n⚠️  流程结束，仍有 {len(todo_remaining)} 个任务未执行"
+        log_text += f"\n\n⚠️  Flow ended with {len(todo_remaining)} task(s) remaining"
     else:
-        log_text += "\n\n✅  流程正常结束，所有任务已完成"
+        log_text += "\n\n✅  Flow completed successfully, all tasks done"
     return [log_text, session] + _hide_buttons()
 
 
@@ -215,7 +215,7 @@ def launch_gui(
         session_state = gr.State({})
 
         log_box = gr.Textbox(
-            label="运行日志",
+            label="Execution Log",
             lines=20,
             interactive=False,
             autoscroll=True,
@@ -225,18 +225,18 @@ def launch_gui(
             buttons = [gr.Button(visible=False) for _ in range(MAX_BUTTONS)]
 
         feedback_box = gr.Textbox(
-            label="修改意见（选择 replan 时填写）",
-            placeholder="例如：将任务3的 place_target 改为 Place_B，其余保持不变",
+            label="Feedback (fill in when choosing replan)",
+            placeholder="e.g. Change task 3's place_target to Place_B, keep everything else",
             lines=3,
         )
 
         with gr.Row():
             prompt_box = gr.Textbox(
-                placeholder="输入任务描述...",
+                placeholder="Enter task description...",
                 show_label=False,
                 scale=4,
             )
-            start_btn = gr.Button("开始", variant="primary", scale=1)
+            start_btn = gr.Button("Start", variant="primary", scale=1)
 
         all_outputs = [log_box, session_state] + buttons
 
