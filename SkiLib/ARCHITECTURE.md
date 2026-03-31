@@ -256,61 +256,77 @@ def test_pick_and_place():
 
 ### 添加新Primitive
 ```python
-# 1. 在 SkiLib/primitives/my_primitive.py 创建文件
+# 1. 在 SkiLib/primitives/ 下新建文件，例如 SkiLib/primitives/gripper.py
+from robodk import robolink
+from typing import Optional
 from SkiLib.base import BasePrimitive, SkillResult, ExecutionPhase, require_robot_active
+from SkiLib.log import get_logger
 
-class MyPrimitive(BasePrimitive):
+logger = get_logger(__name__)
+
+class Grasp(BasePrimitive):
     def __init__(self, robot_object, RDK_object):
-        self.robot = robot_object
-        self.RDK   = RDK_object
+        super().__init__(robot_object, RDK_object)
 
-    def check(self, param: str) -> SkillResult:
-        # 前置检查逻辑
-        return SkillResult(success=True, execution_phase=ExecutionPhase.PLANNING)
+    def check(self, item: robolink.Item, tool: Optional[robolink.Item] = None) -> SkillResult:
+        if not item.Valid():
+            return SkillResult(success=False, execution_phase=ExecutionPhase.PLANNING, ...)
+        return SkillResult(success=True, execution_phase=ExecutionPhase.PLANNING, ...)
 
     @require_robot_active
-    def execute(self, param: str) -> SkillResult:
-        # 执行逻辑；内部异常全部捕获，返回 SkillResult，禁止向上抛出
-        ...
+    def execute(self, item: robolink.Item, tool: Optional[robolink.Item] = None) -> SkillResult:
+        try:
+            tool_item = tool or self.robot.getLink(ITEM_TYPE_TOOL)
+            attached = tool_item.AttachClosest()
+            # TODO [Real robot]: self.robot.setDO(port, 1); wait_for_feedback()
+            return SkillResult(success=True, execution_phase=ExecutionPhase.EXECUTION, ...)
+        except Exception as e:
+            logger.error("Grasp.execute raised %s.", type(e).__name__, exc_info=True)
+            return SkillResult(success=False, ...)
 
-    def try_execute(self, param: str) -> SkillResult:
-        check = self.check(param)
+    def try_execute(self, item: robolink.Item, tool: Optional[robolink.Item] = None) -> SkillResult:
+        check = self.check(item, tool)
         if not check.success:
             return check
-        return self.execute(param)  # type: ignore
+        return self.execute(item, tool)
 
 # 2. 重启程序，自动注册！
 # context.primitives['MyPrimitive'] 现在可用
 ```
 
+> **注意**：新代码一律使用 `SkillResult`，不得使用已废弃的 `CheckResult`。
+
 ### 添加新Skill
 ```python
 # 在 SkiLib/skills/inspection.py 创建文件
-from SkiLib.base import BaseSkill, CheckResult
+from SkiLib.base import BaseSkill, SkillResult
+from SkiLib.log import get_logger
+
+logger = get_logger(__name__)
 
 class Inspection(BaseSkill):
-    def __init__(self, moveJ, moveL, camera=None):
-        # 注意：NO robodk imports!
-        super().__init__(moveJ=moveJ, moveL=moveL, camera=camera)
-    
-    def check(self, waypoints):
-        # 检查所有路点可达性
-        for wp in waypoints:
-            if not self.primitives['moveJ'].check(wp).is_valid:
-                return CheckResult(is_valid=False, ...)
-        return CheckResult(is_valid=True)
-    
-    def execute(self, waypoints):
-        for wp in waypoints:
-            self.primitives['moveJ'].execute(wp)
-            # self.primitives['camera'].capture()
+    REQUIRED_PRIMITIVES = ['MoveJ']
+    # 注意：NO robodk imports in Skills!
 
-# 使用
-from SkiLib.skills.inspection import Inspection
-skill = Inspection(
-    moveJ=context.primitives['MoveJ'],
-    moveL=context.primitives['MoveL']
-)
+    def check(self, waypoints: list) -> SkillResult:
+        for wp in waypoints:
+            result = self.primitives['MoveJ'].check(wp)
+            if not result.success:
+                return result
+        return SkillResult(success=True, execution_phase=ExecutionPhase.PLANNING, ...)
+
+    def execute(self, waypoints: list) -> SkillResult:
+        for wp in waypoints:
+            result = self.primitives['MoveJ'].execute(wp)
+            if not result.success:
+                return result
+        return SkillResult(success=True, execution_phase=ExecutionPhase.EXECUTION, ...)
+
+    def try_execute(self, waypoints: list) -> SkillResult:
+        check = self.check(waypoints)
+        if not check.success:
+            return check
+        return self.execute(waypoints)
 ```
 
 ---
@@ -331,16 +347,13 @@ skill = Inspection(
 ## ⚙️ 配置建议
 
 ### 当前Primitives（已实现/计划）
+- ✅ `MoveJ` - 关节运动
+- ✅ `MoveL` - 直线运动
+- ✅ `Grasp` - 抓取（仿真：AttachClosest；真机：TODO setDO）
+- ✅ `Release` - 释放（仿真：DetachAll；真机：TODO setDO）
+- ⏳ `Screw` - 螺丝刀（未来）
 
-| 原语 | 状态 | 文件 | 说明 |
-|------|------|------|------|
-| `MoveJ` | ✅ 完整 | `primitives/motion.py` | 关节运动；check + execute + try_execute |
-| `MoveL` | ✅ 完整 | `primitives/motion.py` | 直线运动；含全路径 IK 可解性 + 奇点检测 |
-| `Grasp` | ✅ 完整 | `primitives/gripper.py` | 夹爪闭合；`tool.AttachClosest()` 仿真抓取；参数：`force`（N）、`width`（mm） |
-| `Release` | ✅ 完整 | `primitives/gripper.py` | 夹爪打开；`held_item.setParentStatic(station)` 保持世界坐标；参数：`width`（mm） |
-| `Screw` | ⏳ 待实现 | `primitives/screw.py` | 螺丝刀（未来） |
-
-> [2026-03-16 更新] Grasp/Release 已实现。夹爪状态（持有物体）统一存储在 `RobotContext.held_item`，而非模块变量，保证运行时单一真相来源。
+> 由于primitives数量少（<10个），集中管理比动态加载更简洁
 
 ### 推荐文件结构
 ```
