@@ -4,23 +4,24 @@ Accepts natural-language assembly instructions and drives an industrial robot th
 
 ## Architecture
 
-```
-User Instruction
-      │
-      ▼
- Supervisor ──(T-skills)──► scene facts
-      │
-      ▼
-  Planner ──(dynamic tools)──► todo_list
-      │
-      ▼
- plan_review ── [HITL: approve / replan / abort]
-      │ approve
-      ▼
- Dispatcher ──► auto task ──► Executor ──► success ──► Dispatcher (loop)
-             └► manual task ─► ManualHandler ─[HITL: complete/abort]
-                                              Executor failure ──► HITLHandler
-                                               [HITL: retry / next_task / replan / abort]
+```mermaid
+flowchart LR
+    U(["👤 Operator"])
+    U -->|"Natural language\ninstruction"| AG
+
+    subgraph AG["Agent Layer · LangGraph"]
+        direction TB
+        S["🔍 Supervisor"] --> P["📋 Planner"]
+        P --> PR["⏸ Plan Review"]
+        PR --> D["⚙️ Dispatcher"]
+        D -->|auto| E["🤖 Executor"]
+        D -->|manual| MH["⏸ Manual Handler"]
+        E -->|failure| HH["⏸ HITL Handler"]
+    end
+
+    AG -->|"skill.try_execute()"| SL["SkiLib\nPickAndPlace · MoveJ/L · Grasp/Release"]
+    SL -->|"RoboDK API"| R(["🤖 RoboDK"])
+    U <-.->|"approve / retry / replan"| PR & MH & HH
 ```
 
 **Two-layer design:**

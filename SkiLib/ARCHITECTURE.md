@@ -3,17 +3,41 @@
 ## 🎯 核心设计原则
 
 ### 1️⃣ 分层解耦
-```
-┌─────────────────────────────────────┐
-│         Skills (高层抽象)             │  ← 平台无关，纯逻辑组合
-│   PickAndPlace, Inspection, etc.    │  ← 不import robodk
-├─────────────────────────────────────┤
-│      Primitives (底层实现)            │  ← 平台相关（RoboDK）
-│   MoveJ, MoveL, Grasp, Release      │  ← import robodk
-├─────────────────────────────────────┤
-│    PrimitiveRegistry (管理层)        │  ← 自动发现和实例化
-│      RobotContext (单例)             │  ← RoboDK连接管理
-└─────────────────────────────────────┘
+
+```mermaid
+graph TB
+    subgraph Agent["Agent Layer (LangGraph)"]
+        EXE["🤖 Executor\nnodes/executor.py"]
+        SUP["🔍 Supervisor\nnodes/supervisor.py"]
+    end
+
+    subgraph SkiLib["SkiLib · Skill Library (no LangGraph dependency)"]
+        subgraph Reg["Registry / Context"]
+            SR["SkillRegistry\nauto-scans skills/"]
+            RC["RobotContext\nRoboDK connection singleton"]
+        end
+        subgraph Skills["Skills · platform-agnostic  ❌ no robodk import"]
+            PaP["PickAndPlace\n8-step sequence"]
+        end
+        subgraph Prims["Primitives · RoboDK-bound  ✅ robodk import"]
+            MJ["MoveJ"] & ML["MoveL"]
+            GR["Grasp"] & RE["Release"]
+        end
+    end
+
+    RDK(["🤖 RoboDK Simulation / Real Robot"])
+
+    EXE -->|"get_skill(name)"| SR
+    SUP -->|"get_tools() — T-skills"| SR
+    SR -->|"instantiates via\nREQUIRED_PRIMITIVES"| PaP
+    PaP -->|uses| MJ & ML & GR & RE
+    RC -->|"injects robot + RDK context"| MJ & ML & GR & RE
+    MJ & ML & GR & RE -->|"RoboDK API calls"| RDK
+
+    style Agent fill:#dbeafe,stroke:#3b82f6
+    style Skills fill:#d1fae5,stroke:#10b981
+    style Prims fill:#fce7f3,stroke:#ec4899
+    style Reg fill:#fef3c7,stroke:#f59e0b
 ```
 
 ### 2️⃣ 依赖注入模式

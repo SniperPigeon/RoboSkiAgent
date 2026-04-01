@@ -1,7 +1,7 @@
 # RoboSkiAgent 实现 Checklist
 
 > 按依赖顺序排列。每阶段完成后再进入下一阶段。
-> 最后更新：2026-03-26（Executor 完整实现；HITL 行为修正；GlobalState last_result 类型升级；端到端 run cell + Planner 单元测试）
+> 最后更新：2026-03-30（Phase 6 迁移完成：Agent/ 包生产化，CLI 入口，prompts/ 目录；CLI interrupt handling 标注为待实现）
 
 ---
 
@@ -140,6 +140,13 @@
   - 可用技能列表由代码注入 system prompt（`_get_available_skills()`），LLM 只读取不生成
   - ~~`create_react_agent`~~ 已废弃，改用新 API `create_agent`
 
+- [x] **3.5** `graph_test.ipynb` — **plan_review 节点** *(2026-03-27)*
+  - interrupt 结构审批门：`approve` → dispatcher；`replan` → supervisor；`abort` → END
+  - 向操作员展示完整 `todo_list` 摘要（task_id / type / skill or description）
+  - `replan` 路径：resume payload 为 `{"action": "replan", "feedback": "..."}`，写入 `HumanMessage` + 清空 `todo_list`
+  - `plan_review_action` 字段已加入 `GlobalState`
+  - ⚠️ **待修**：Planner system prompt 仍残留"在计划前插入 manual task"规则，导致 approve 后多弹一次 complete/abort
+
 - [x] **3.5** `graph_test.ipynb` — **HITL stub 节点** *(2026-03-26，框架重构 + 行为修正)*
   - 原单节点 `human_intervention` 已彻底拆分为：
     - `manual_intervention_handler`：处理 `type="manual"` 任务，actions: `complete` / `abort`
@@ -258,6 +265,36 @@
   - 三处 `print()` 在异常捕获块内（IK solving、singularity check、manipulability）
   - 改为 `logger.error(..., exc_info=True)`
 
+---
+
+## Phase 6 · Notebook → 生产代码迁移
+*将 `graph_test.ipynb` 中验证通过的逻辑迁移为可独立运行的 .py 文件；提升可维护性和可测试性*
+> 最后更新：2026-03-30（迁移完成）
+
+- [x] **6.1** 抽取 Prompt 到 `Agent/prompts/` 目录 *(2026-03-30)*
+  - `supervisor.txt` / `planner.txt` / `executor.txt`（纯文本，运行时 `.format()` 注入）
+  - 节点内通过 `_load_prompt(name)` 读取，路径相对于 `nodes/` 解析
+
+- [x] **6.2** 迁移 `GlobalState` 及节点函数到独立 `.py` 文件 *(2026-03-30)*
+  - `Agent/state.py`：`GlobalState` TypedDict
+  - `Agent/nodes/`：supervisor / planner / plan_review / dispatcher / executor / manual_handler / hitl_handler
+  - 路由函数随各节点文件一并迁移（`task_router` / `post_task_router` 等）
+  - `Agent/graph.py`：`build_graph()` + `make_initial_state()`，含 `MemorySaver` + `JsonPlusSerializer`
+  - 保持 `Agent → SkiLib` 单向依赖
+
+- [x] **6.3** Gradio GUI 迁移到 `Agent/gui.py` *(2026-03-30)*
+  - `start_flow` / `handle_choice` / `_check_for_interrupt` 完整迁移
+  - `python -m Agent.gui` 直接启动
+
+- [x] **6.4** CLI 入口 `Agent/__main__.py` *(2026-03-30)*
+  - `python -m Agent "<指令>"` 可调用图执行
+  - 支持 `--skip-check` bypass 模式
+
+- [ ] **6.5** CLI interrupt handling ⚠️ **尚未实现**
+  - 当前 `__main__.py` 使用 `graph.invoke()`，遇到任意 `interrupt()` 节点（`plan_review` / `hitl_handler` / `manual_intervention_handler`）会抛出 `NodeInterrupt` 异常，导致 CLI 无法完成含人工审批的完整流程
+  - **解决方案**：改用 `graph.stream()` + 捕获 `GraphInterrupt`，提示操作员输入后调用 `graph.invoke(Command(resume=...))` 恢复
+  - **现状**：GUI（`Agent/gui.py`）已实现完整 interrupt 处理，推荐使用 GUI
+
 - [ ] **5.6** Notebook (`Agent/LangGraph.ipynb`) 迁移
   - 保留 `logging.basicConfig(level=logging.INFO)` 初始化 cell
   - 节点函数中 `print()` → `logger.info()`（Notebook 环境 StreamHandler 即等同于 print）
@@ -288,8 +325,15 @@
 | `SkiLib/specs/example_assembly.yaml` | ❌ 待建 | 1.3 |
 | `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
 | `SkiLib/metatools/informative.py` | ✅ 完成（T-skills: list_targets/objects/tools, check_item_exists, get_gripper_state） | 新增 |
-| `Agent/notebooks/graph_test.ipynb` | ⚠️ Supervisor✅ Planner✅ Dispatcher✅ Executor✅ HITL行为修正✅ interrupt缺失⚠️ | 3.2–3.5.6 |
-| `SkiLib/graph.py` | ⚠️ stub（旧版，已被 graph_test.ipynb 超越）；待迁移或废弃 | — |
+| `Agent/state.py` | ✅ 完成（GlobalState TypedDict） | 6.2 |
+| `Agent/graph.py` | ✅ 完成（build_graph + make_initial_state） | 6.2 |
+| `Agent/llm.py` | ✅ 完成（claude / ollama 工厂） | 6.2 |
+| `Agent/gui.py` | ✅ 完成（Gradio，完整 interrupt 支持） | 6.3 |
+| `Agent/__main__.py` | ⚠️ 完成，CLI interrupt handling 未实现（见 6.5） | 6.4 |
+| `Agent/prompts/` | ✅ 完成（supervisor.txt / planner.txt / executor.txt） | 6.1 |
+| `Agent/nodes/` | ✅ 完成（7 个节点均已迁移） | 6.2 |
+| `Agent/notebooks/graph_test.ipynb` | 参考文档（核心逻辑已迁移至 Agent/ 包） | — |
+| `SkiLib/graph.py` | ⚠️ 错位文件（含 LangGraph 依赖，违反 SkiLib 约束）；待废弃 | — |
 | `SkiLib/main.py` | ⚠️ 调试用，待重写 | 3.6 |
 
 ---
