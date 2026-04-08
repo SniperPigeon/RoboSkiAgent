@@ -223,4 +223,139 @@ class PrimitiveRegistry:
         """Manually register a primitive (for custom/extension primitives)"""
         self._primitives[name] = primitive
         print(f"[PrimitiveRegistry] Manually registered: {name}")
-    
+
+    # ------------------------------------------------------------------
+    # V2: LLM-facing tool wrappers
+    # ------------------------------------------------------------------
+
+    def as_tools(self) -> list:
+        """
+        Return a LangChain StructuredTool list for all registered primitives.
+
+        All tool parameters are symbolic strings (RoboDK item names) — no
+        robolink.Item or robomath.Mat types are exposed to the LLM.
+        Symbol resolution (str → RDK.Item) happens inside each wrapper so that
+        invalid names produce ERROR_INVALID_PARAM rather than a Python exception.
+
+        Currently wraps: MoveJ, MoveL, Grasp, Release.
+        Other primitives are skipped (no LLM-facing signature defined for them).
+        """
+        from langchain_core.tools import StructuredTool
+        from pydantic import BaseModel, Field as PField
+
+        from SkiLib.base import SkillResult, ExecutionPhase, ERROR_INVALID_PARAM
+
+        tools: list[StructuredTool] = []
+        RDK  = self.RDK
+
+        # ---- helper: resolve symbol name → Item, return error SkillResult on failure ----
+        def _resolve(name: str) -> tuple:
+            item = RDK.Item(name)
+            if not item.Valid():
+                err = SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.VALIDATION,
+                    error_type=ERROR_INVALID_PARAM,
+                    message=f"Symbol '{name}' not found in RoboDK station.",
+                    suggestion="Use list_targets() or list_objects() to see valid names.",
+                )
+                return None, err
+            return item, None
+
+        # ---- MoveJ ----
+        if "MoveJ" in self._primitives:
+            prim_movej = self._primitives["MoveJ"]
+
+            class MoveJSchema(BaseModel):
+                target: str = PField(description="RoboDK target name to move to (joint motion).")
+
+            def _movej(target: str) -> dict:
+                item, err = _resolve(target)
+                if err:
+                    return err.to_llm_message()
+                return prim_movej.try_execute(target=item).to_llm_message()
+
+            tools.append(StructuredTool(
+                name="MoveJ",
+                description=(
+                    "Move the robot to a named target using joint motion. "
+                    "Safe for large moves between distant configurations. "
+                    "target must be a valid RoboDK target name (use list_targets() to check)."
+                ),
+                func=_movej,
+                args_schema=MoveJSchema,
+            ))
+
+        # ---- MoveL ----
+        if "MoveL" in self._primitives:
+            prim_movel = self._primitives["MoveL"]
+
+            class MoveLSchema(BaseModel):
+                target: str = PField(description="RoboDK target name to move to (linear Cartesian motion).")
+
+            def _movel(target: str) -> dict:
+                item, err = _resolve(target)
+                if err:
+                    return err.to_llm_message()
+                return prim_movel.try_execute(target=item).to_llm_message()
+
+            tools.append(StructuredTool(
+                name="MoveL",
+                description=(
+                    "Move the robot to a named target using linear Cartesian motion. "
+                    "Required for approach and retract near workpieces — do NOT substitute with MoveJ. "
+                    "target must be a valid RoboDK target name (use list_targets() to check)."
+                ),
+                func=_movel,
+                args_schema=MoveLSchema,
+            ))
+
+        # ---- Grasp ----
+        if "Grasp" in self._primitives:
+            prim_grasp = self._primitives["Grasp"]
+
+            class GraspSchema(BaseModel):
+                expected_item: str = PField(description="RoboDK object name of the workpiece to grasp.")
+
+            def _grasp(expected_item: str) -> dict:
+                item, err = _resolve(expected_item)
+                if err:
+                    return err.to_llm_message()
+                return prim_grasp.try_execute(expected_item=item).to_llm_message()
+
+            tools.append(StructuredTool(
+                name="Grasp",
+                description=(
+                    "Close the gripper and attach the nearest object to the tool tip. "
+                    "The robot must already be positioned at the pick target via MoveL before calling this. "
+                    "expected_item must be the RoboDK object name of the intended workpiece."
+                ),
+                func=_grasp,
+                args_schema=GraspSchema,
+            ))
+
+        # ---- Release ----
+        if "Release" in self._primitives:
+            prim_release = self._primitives["Release"]
+
+            class ReleaseSchema(BaseModel):
+                expected_item: str = PField(description="RoboDK object name of the workpiece to release.")
+
+            def _release(expected_item: str) -> dict:
+                item, err = _resolve(expected_item)
+                if err:
+                    return err.to_llm_message()
+                return prim_release.try_execute(expected_item=item).to_llm_message()
+
+            tools.append(StructuredTool(
+                name="Release",
+                description=(
+                    "Open the gripper and release all objects attached to the tool. "
+                    "The robot must already be positioned at the place target via MoveL before calling this. "
+                    "expected_item must be the RoboDK object name of the intended workpiece."
+                ),
+                func=_release,
+                args_schema=ReleaseSchema,
+            ))
+
+        return tools
