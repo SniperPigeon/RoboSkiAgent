@@ -23,7 +23,16 @@ from langgraph.types import Command
 from SkiLib.log import get_logger, attach_queue_handler
 from SkiLib.registry import SkillRegistry
 from SkiLib.robotcontext import RobotContext
-from Agent.graph import build_graph, make_initial_state
+# ── Version switch ─────────────────────────────────────────────────────────
+# Set USE_V2 = True to run the skill.md-based planner/executor (V2 graph).
+# Set USE_V2 = False to run the original Python BaseSkill graph (V1).
+USE_V2: bool = True
+
+if USE_V2:
+    from Agent.graph_v2 import build_graph_v2 as build_graph
+else:
+    from Agent.graph import build_graph
+from Agent.graph import make_initial_state   # shared; same in both versions
 from Agent.nodes.supervisor import reset_supervisor_cache
 
 

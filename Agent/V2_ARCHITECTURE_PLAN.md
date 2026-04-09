@@ -362,41 +362,43 @@ def as_tools(self) -> list:
 - [x] 列出哪些参数是 `robolink.Item`（需包装），哪些已是 `str`
 - [x] 将审查结果更新到本文件 "Primitive 签名记录" 小节
 
-### Step 1 — `SkiLib/skill_loader.py` `[ ]`
-- [ ] 实现 `SkillSpec` dataclass（name, description, category, required_primitives, args_schema, body）
-- [ ] 实现 `SkillMdLoader` 单例（`load_all` 扫描 `skills/*.md`，忽略 `.py`）
-- [ ] 实现 `_parse_md()`：以 `---` 分割 frontmatter/body，解析 YAML
-- [ ] 实现 `_build_pydantic_schema()`：`pydantic.create_model()`，支持 enum→Literal、Optional+default
-- [ ] 验证：`python -c "from SkiLib.skill_loader import SkillMdLoader; ..."` 能正确解析测试 .md
+### Step 1 — `SkiLib/skill_loader.py` `[x]`
+- [x] 实现 `SkillSpec` dataclass（name, description, category, required_primitives, args_schema, body）
+- [x] 实现 `SkillMdLoader` 单例（`load_all` 扫描 `skills/*.md`，忽略 `.py`）
+- [x] 实现 `_parse_md()`：以 `---` 分割 frontmatter/body，解析 YAML
+- [x] 实现 `_build_pydantic_schema()`：`pydantic.create_model()`，支持 enum→Literal、Optional+default
+- [x] 验证：解析 pick_and_place.md 正确，8 个字段，enum→Literal，required→PydanticUndefined
 
-### Step 2 — `SkiLib/skills/pick_and_place.md` `[ ]`
-- [ ] 按方案格式完整编写（frontmatter parameters + body 含 10 步序列 + Recovery Hints）
-- [ ] 验证：`SkillMdLoader.instance().get("PickAndPlace").args_schema.model_fields` 正确
-- [ ] 验证：`spec.body` 包含完整执行指导
+### Step 2 — `SkiLib/skills/pick_and_place.md` `[x]`
+- [x] 按方案格式完整编写（frontmatter parameters + body 含 10 步序列 + Recovery Hints）
+- [x] 验证：`SkillMdLoader.instance().get("PickAndPlace").args_schema.model_fields` 正确
+- [x] 验证：`spec.body` 包含完整执行指导
 
-### Step 3 — `PrimitiveRegistry.as_tools()` `[ ]`
-- [ ] 在 `SkiLib/robotcontext.py` 的 `PrimitiveRegistry` 末尾新增 `as_tools()` 方法
-- [ ] 为 MoveJ / MoveL 生成包装工具（参数：`target: str`，内部 `RDK.Item(target)` 转换）
-- [ ] 为 Grasp / Release 生成包装工具（参数：`expected_item: str`）
-- [ ] 验证：调用 `as_tools()` 返回 4 个 StructuredTool，tool names 正确
+### Step 3 — `PrimitiveRegistry.as_tools()` `[x]`
+- [x] 在 `SkiLib/robotcontext.py` 的 `PrimitiveRegistry` 末尾新增 `as_tools()` 方法
+- [x] 为 MoveJ / MoveL 生成包装工具（参数：`target: str`，内部 `RDK.Item(target)` 转换）
+- [x] 为 Grasp / Release 生成包装工具（参数：`expected_item: str`）
 
-### Step 4 — `Agent/nodes/planner_v2.py` `[ ]`
-- [ ] 复制 `planner.py` 为 `planner_v2.py`
-- [ ] 替换 `_make_planner_tools()` → `_make_planner_tools_v2()`（改用 `SkillMdLoader`）
-- [ ] 移除 `SkillRegistry` 依赖
-- [ ] 验证：`_make_planner_tools_v2()` 返回的 `PickAndPlace` 工具 args_schema 含 `item`、`pick_target` 等字段
+### Step 4 — `Agent/nodes/planner_v2.py` `[x]`
+- [x] 创建 `planner_v2.py`，工具 schema 来自 `SkillMdLoader`
+- [x] `_make_planner_tools_v2()`：从 `SkillSpec.args_schema` 生成 add_<Skill>_task 工具
+- [x] system_prompt 注入 Available Skills 摘要（来自 skill.md）
+- [x] 无 `SkillRegistry` 依赖
+- [x] 提供 `get_available_skills_from_md()` 辅助函数供 supervisor 使用
 
-### Step 5 — `Agent/prompts/skill_executor.txt` + `Agent/nodes/executor_v2.py` `[ ]`
-- [ ] 创建 `Agent/prompts/skill_executor.txt`（通用约束：符号名规则、escalate 条件、recovery 优先级）
-- [ ] 创建 `Agent/nodes/executor_v2.py`（`executor_v2` 函数 + `_build_executor_system_prompt`）
-- [ ] 实现 sub-agent 启动逻辑（`create_agent` + `_EscalateHITLException` 捕获）
-- [ ] 实现成功/失败路径的 state 返回（`current_task: {}` 清空、`halt_flag` 设置）
+### Step 5 — `Agent/prompts/skill_executor.txt` + `Agent/nodes/executor_v2.py` `[x]`
+- [x] 创建 `Agent/prompts/skill_executor.txt`（符号名规则、escalate 条件、recovery 优先级、HITL resume 提示）
+- [x] 创建 `Agent/nodes/executor_v2.py`（`executor_v2` + `_build_executor_system_prompt` + `post_task_router_v2`）
+- [x] 实现 sub-agent 启动逻辑（`create_agent` + `_EscalateHITLException` 捕获）
+- [x] 实现成功/失败路径的 state 返回（`current_task: {}` 清空、`halt_flag` 设置）
+- [x] 复用原 executor.py 的 `escalate_tool` / `_EscalateHITLException`（re-export）
 
-### Step 6 — `Agent/graph_v2.py` `[ ]`
-- [ ] 复制 `graph.py` 为 `graph_v2.py`
-- [ ] 替换 planner → planner_v2，executor → executor_v2
-- [ ] 保留其余所有节点（supervisor, dispatcher, plan_review, manual_handler, hitl_handler）不变
-- [ ] 导出 `build_graph_v2()` 函数
+### Step 6 — `Agent/graph_v2.py` `[x]`
+- [x] 创建 `graph_v2.py`，与 `graph.py` 拓扑完全相同
+- [x] 替换 planner → planner_v2，executor → executor_v2，post_task_router → post_task_router_v2
+- [x] 保留其余所有节点（supervisor, dispatcher, plan_review, manual_handler, hitl_handler）不变
+- [x] 导出 `build_graph_v2()` 和 `make_initial_state()` 函数
+- [x] 导入验证通过（python -c 所有断言通过）
 
 ### Step 7 — 集成测试 `[ ]`
 - [ ] 修改 GUI 或 `__main__.py` 支持选择 `build_graph_v2`
