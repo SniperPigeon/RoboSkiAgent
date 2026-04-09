@@ -263,6 +263,12 @@ class BasePrimitive(ABC):
         """Execute the primitive action. Must catch all exceptions internally."""
         pass
 
+    def _should_skip_check(self) -> bool:
+        """Return True when RobotContext.debug_skip_check is set (simulation / test mode)."""
+        from SkiLib.robotcontext import RobotContext  # noqa: PLC0415
+        ctx = RobotContext.instance()
+        return ctx is not None and bool(ctx.debug_skip_check)
+
     @abstractmethod
     def try_execute(self, *args, **kwargs) -> SkillResult:
         """Run check(), then execute() if the check passed. Returns a single SkillResult."""

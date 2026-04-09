@@ -136,9 +136,10 @@ class MoveJ(BasePrimitive):
             )
 
     def try_execute(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None, blocking: bool = True) -> SkillResult:
-        check = self.check(target, ref_frame)
-        if not check.success:
-            return check
+        if not self._should_skip_check():
+            check = self.check(target, ref_frame)
+            if not check.success:
+                return check
         return self.execute(target, blocking, ref_frame) #type: ignore
 
 
@@ -286,7 +287,8 @@ class MoveL(BasePrimitive):
             )
 
     def try_execute(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None, blocking: bool = True) -> SkillResult:
-        check = self.check(target, ref_frame)
-        if not check.success:
-            return check
+        if not self._should_skip_check():
+            check = self.check(target, ref_frame)
+            if not check.success:
+                return check
         return self.execute(target, ref_frame, blocking) #type: ignore

@@ -187,9 +187,10 @@ class Grasp(BasePrimitive):
         expected_item: robolink.Item,
         tool: Optional[robolink.Item] = None,
     ) -> SkillResult:
-        check = self.check(expected_item, tool)
-        if not check.success:
-            return check
+        if not self._should_skip_check():
+            check = self.check(expected_item, tool)
+            if not check.success:
+                return check
         return self.execute(expected_item, tool)
 
 
@@ -309,7 +310,8 @@ class Release(BasePrimitive):
         expected_item: robolink.Item,
         tool: Optional[robolink.Item] = None,
     ) -> SkillResult:
-        check = self.check(expected_item, tool)
-        if not check.success:
-            return check
+        if not self._should_skip_check():
+            check = self.check(expected_item, tool)
+            if not check.success:
+                return check
         return self.execute(expected_item, tool)
