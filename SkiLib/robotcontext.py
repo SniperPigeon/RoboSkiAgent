@@ -72,12 +72,23 @@ class RobotContext:
         from SkiLib.registry import SkillRegistry  # local import avoids circular dependency
         SkillRegistry().set_robot_context(self)
 
+        # SensorRegistry: scan sensors/ and aggregate execution-time perception tools.
+        # No context injection needed — sensor functions resolve RobotContext lazily.
+        from SkiLib.sensors import SensorRegistry  # local import avoids circular dependency
+        self.sensor_registry = SensorRegistry()
+        self.sensor_registry.initialize()
+
         self._initialized = True
 
     @property
     def primitives(self) -> Dict[str, 'BasePrimitive']:
-        """Quick access to primitive instances"""
+        """Quick access to primitive instances."""
         return self.primitive_registry.get_all()
+
+    @property
+    def sensor_tools(self) -> list:
+        """Flat list of all execution-time sensor tools for llm.bind_tools()."""
+        return self.sensor_registry.get_tools()
 
     def get_current_state(self):
         """
