@@ -98,15 +98,6 @@ class MoveJ(BasePrimitive):
                     self.robot.MoveJ(target, blocking=blocking)
                 finally:
                     self.robot.setPoseFrame(prev_frame)
-            elif isinstance(target, Item):
-                original_frame = self.robot.getLink(robolink.ITEM_TYPE_FRAME)
-                if not original_frame.Valid():
-                    original_frame = self.robot.Parent()
-                try:
-                    self.robot.setPoseFrame(target.Parent())
-                    self.robot.MoveJ(target, blocking=blocking)
-                finally:
-                    self.robot.setPoseFrame(original_frame)
             else:
                 self.robot.MoveJ(target, blocking=blocking)
 
@@ -119,13 +110,6 @@ class MoveJ(BasePrimitive):
                 data={"joints": state.joints},
             )
         except Exception as e:
-            # TODO: error_type is over-broadly mapped to ERROR_TIMEOUT here.
-            # RoboDK communication failures (socket disconnect, process crash) and
-            # execution anomalies (unexpected joint limit, servo fault) are currently
-            # indistinguishable. A finer-grained mapping is needed so that Executor
-            # Layer-1 retry logic can correctly identify retriable vs non-retriable failures.
-            # Suggested split: ERROR_COMMS for robolink socket errors, ERROR_TIMEOUT for
-            # genuine timeouts, and preserve ERROR_TIMEOUT only as a catch-all fallback.
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
@@ -184,17 +168,12 @@ class MoveL(BasePrimitive):
             # Joint values → FK gives pose in robot base frame.
             target_pose = self.robot.SolveFK(target)
         else:
-            # Item: set active frame to target's parent so MoveL_Test uses the correct reference.
-            original_frame = self.robot.getLink(robolink.ITEM_TYPE_FRAME)
-            self.robot.setPoseFrame(target.Parent())
-            target_pose = target.Pose()
+            # Item: get its pose in the world frame then express it relative to robot base.
+            target_pose = self.robot.PoseFrame().inv() * target.Pose()
 
         self.RDK.setCollisionActive(True)
         test_result = self.robot.MoveL_Test(start, target_pose)
         self.RDK.setCollisionActive(False)
-
-        if isinstance(target, Item):
-            self.robot.setPoseFrame(original_frame)  # restore after MoveL_Test
 
         if test_result == 0:
             return SkillResult(
@@ -254,15 +233,6 @@ class MoveL(BasePrimitive):
                     self.robot.MoveL(target, blocking=blocking)
                 finally:
                     self.robot.setPoseFrame(prev_frame)
-            elif isinstance(target, Item):
-                original_frame = self.robot.getLink(robolink.ITEM_TYPE_FRAME)
-                if not original_frame.Valid():
-                    original_frame = self.robot.Parent()  # fall back to base frame
-                try:
-                    self.robot.setPoseFrame(target.Parent())
-                    self.robot.MoveL(target, blocking=blocking)
-                finally:
-                    self.robot.setPoseFrame(original_frame)  # always restore original reference frame
             else:
                 self.robot.MoveL(target, blocking=blocking)
 
@@ -275,7 +245,6 @@ class MoveL(BasePrimitive):
                 data={"pose": state.pose},
             )
         except Exception as e:
-            # TODO: same over-broad error_type mapping as MoveJ — see MoveJ.execute()
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,

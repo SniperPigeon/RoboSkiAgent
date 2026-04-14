@@ -1,56 +1,30 @@
 # RoboSkiAgent 实现 Checklist
 
 > 按依赖顺序排列。每阶段完成后再进入下一阶段。
-> 最后更新：2026-03-26（Executor 完整实现；HITL 行为修正；GlobalState last_result 类型升级；端到端 run cell + Planner 单元测试）
+> 最后更新：2026-03-13
 
 ---
 
 ## Phase 0 · SkillRegistry 基础设施
 *所有后续阶段的前置依赖*
 
-- [x] **0.1** 新建 `SkiLib/registry.py`：`SkillRegistry` 单例 *(2026-03-18)*
-  - ~~`register(skill_class, metadata)` — 由 `@skill` 装饰器调用~~ → 改为反射扫描（见 0.2 决策说明）
+- [ ] **0.1** 新建 `SkiLib/registry.py`：`SkillRegistry` 单例
+  - `register(skill_class, metadata)` — 由 `@skill` 装饰器调用
   - `set_robot_context(context)` — 触发 eager init，创建所有 Skill 实例
   - `get_skill(name)` / `registry[name]` — 返回已初始化实例
   - `list_skills(category=None)` — 列举已注册技能（供 Supervisor 查询）
-  - `get_llm_tool_schemas(format)` — 生成 Anthropic 格式工具 schema（基于 LangChain args_schema）
-  - `get_tools()` — 展平所有 skill.as_tools()，供 Executor llm.bind_tools() 使用
+  - `get_llm_tool_schemas(format)` — 生成并缓存 Anthropic 格式工具 schema
 
-- [x] **0.2** ~~新建 `SkiLib/decorators.py`~~ **决策：不创建** *(2026-03-18)*
-  - **原计划**：`@skill` 装饰器在 import 时注册元数据
-  - **实际采用**：反射扫描（镜像 PrimitiveRegistry），元数据用类变量 `SKILL_DESCRIPTION / SKILL_CATEGORY` 声明
-  - **理由**：与 PrimitiveRegistry 完全一致，无循环导入风险，零样板代码
-  - `BaseSkill` 新增 `SKILL_DESCRIPTION: str = ""` 和 `SKILL_CATEGORY: str = "skill"` 类变量
-  - `BaseSkill` 新增 `as_tools() -> List[StructuredTool]`（按 CLAUDE.md 规范，lazy import LangChain）
+- [ ] **0.2** 新建 `SkiLib/decorators.py`：`@skill(name, description, category, parameters)` 装饰器
+  - 在 import 时将类 + 元数据写入 `SkillRegistry`
 
-- [x] **0.3** ~~更新 `SkiLib/__init__.py`~~ **无需改动** *(2026-03-18)*
-  - SkillRegistry 在 `set_robot_context()` 时自己扫描 `skills/`，不依赖 `__init__.py` 预先 import
+- [ ] **0.3** 更新 `SkiLib/__init__.py`：用 `pkgutil` 自动 import `primitives/` 和 `skills/` 下全部模块
+  - import 触发 `@skill` 装饰器执行 → 自动完成注册，**无需手工维护列表**
 
-- [x] **0.4** 更新 `SkiLib/robotcontext.py` *(2026-03-18)*
-  - `RobotContext.__init__` 末尾调用 `SkillRegistry().set_robot_context(self)`（local import 避免循环）
-  - 新增 `get_current_state() -> RobotState`（关节角 + 位姿快照，供 GlobalState 初始化）
-  - **技术债务保留**：`PrimitiveRegistry` 中 `from SkiLib.primitives import motion` 死代码未清理（Phase 5 统一处理）
-
----
-
-## Phase 0.5 · 设计决策记录（已落地，无对应 Phase）
-
-- [x] **D1** `BaseSkill.TOOL_METHODS = ("check", "try_execute")` *(2026-03-20)*
-  - `execute` 从 LLM 工具列表中移除：跳过校验的调用路径不应暴露给 LLM
-  - `check` 保留：LLM 可做"看而不动"的可行性探测
-  - `try_execute` 是 LLM 的正常执行路径（内置安全校验）
-  - 子类可通过覆盖 `TOOL_METHODS` 调整（如需暴露 `execute` 的特殊场景）
-
-- [x] **D2** `Grasp`/`Release` 参数 `item` → `expected_item` *(2026-03-20)*
-  - 夹爪无感知能力：`AttachClosest()` 基于距离，`DetachAll()` 释放全部
-  - `expected_item` 仅用于预检有效性和溯源日志，不影响实际夹取对象
-  - `Grasp.execute()` 新增 `intended/attached` 差异日志，便于调试站点配置错误
-
-- [x] **D3** `PickAndPlace` 接近点改为显式参数 *(2026-03-20)*
-  - 原规划（2.3）：接近点由 `GetApproachTarget` 按命名约定 `"Approach_<target>"` 自动查找
-  - 实际实现：`pick_approach` / `place_approach` 作为显式字符串参数传入
-  - **理由**：LLM 应明确指定所有目标符号；隐式约定对 LLM 不透明且增加不必要的 primitive 依赖
-  - 命名约定（`Approach_*`）保留为 RoboDK 站点规范建议，但不在代码层强制
+- [ ] **0.4** 更新 `SkiLib/robotcontext.py`：
+  - 移除 `PrimitiveRegistry` 中硬编码的 `from SkiLib.primitives import motion` 扫描逻辑
+  - 在 `RobotContext.__init__` 最后调用 `SkillRegistry.instance().set_robot_context(self)`
+  - 增加 `get_current_state() -> RobotState` 方法（关节角 + 位姿快照，供 GlobalState 初始化）
 
 ---
 
@@ -82,32 +56,24 @@
 ## Phase 2 · 夹爪原语 + PickAndPlace 重写
 *Motion primitives 补全；PickAndPlace 与 RoboDK 树约定对齐*
 
-- [x] **2.1** 补全 `SkiLib/primitives/motion.py` 中的 `MoveL.check()` *(2026-03-13)*
+- [ ] **2.1** 补全 `SkiLib/primitives/motion.py` 中的 `MoveL.check()`
   - 参考 `MoveJ.check()` 实现；调用 `robot.MoveL_Test(current_joints, target_pose)`
   - 返回值：0=成功，-1=无法线性，-2=目标不可达，>0=碰撞数
   - 移除 `@require_robot_active(bypass_halt=False)` 冗余参数，改为无参数形式
 
-- [x] **2.2** 新建 `SkiLib/primitives/gripper.py` *(2026-03-17)*
-  - `Grasp(expected_item: robolink.Item, tool: Optional[Item] = None) -> SkillResult`
-    - 仿真：`tool.AttachClosest()`；真机：TODO `setDO` + 反馈等待
-    - **参数命名**：`item` → `expected_item`（2026-03-20）：夹爪无法选择目标，`expected_item` 仅用于预检和溯源日志，不决定抓哪个
-    - `execute()` 新增溯源日志：`intended='X', attached='Y'`，暴露预期与实际附着的差异
-  - `Release(expected_item: robolink.Item, tool: Optional[Item] = None) -> SkillResult`
-    - 仿真：`tool.DetachAll(station)`（物理语义：夹爪开→释放全部）；真机：TODO `setDO`
+- [ ] **2.2** 新建 `SkiLib/primitives/gripper.py`
+  - `Grasp(tool_name=None) -> SkillResult`：调用 RoboDK 夹爪关闭接口（或仿真中 `robot.setDO()`）
+  - `Release(tool_name=None) -> SkillResult`：夹爪张开
   - 两个原语均使用 `@require_robot_active` 保护
-  - `execution_phase = ExecutionPhase.EXECUTION`（复用现有枚举，不新增 phase）
-  - **技术债务**：`robotcontext.py` 三处 `print()` 待 Phase 5.5 统一迁移
+  - `execution_phase = ExecutionPhase.GRIPPING / RELEASING`
 
-- [x] **2.3** 重写 `SkiLib/skills/pick_and_place.py` *(2026-03-20)*
-  - **实现方案与原规划不同**：接近点改为显式参数（`pick_approach`、`place_approach`），不采用命名约定自动查找（`GetApproachTarget`）
-    - **理由**：LLM 作为调用方应明确指定所有目标，隐式命名约定对 LLM 不透明，且增加对 Phase 1 `scene_query` 的不必要依赖
-    - `REQUIRED_PRIMITIVES = ['MoveJ', 'MoveL', 'Grasp', 'Release']`（无需 `GetApproachTarget`）
-  - **执行序列**（8步）：`initial_motion→pick_approach` → `MoveL→pick_target` → `Grasp` → `MoveL→pick_approach` → `transit_motion→place_approach` → `MoveL→place_target` → `Release` → `MoveL→place_approach`
-  - **参数** `transit_motion: str = "MoveL"`：携工件过渡段运动类型（默认由 MoveJ 改为 MoveL，2026-03-26）
-  - **参数** `initial_motion: str = "MoveL"`：初始进入 pick_approach 的运动类型（原名 `approach_motion`，2026-03-26 重命名并改默认值为 MoveL）
-  - `execute()` / `check()` / `try_execute()` 均返回 `SkillResult`，无 `CheckResult` 使用
-  - `check()` 验证：所有目标存在性（symbol resolve）+ 各段运动可达性（调用 primitive.check()）
-  - `try_execute()` 支持 `_should_skip_check()` bypass（调试用）
+- [ ] **2.3** 重写 `SkiLib/skills/pick_and_place.py`
+  - **移除 `approach_height` 参数**；接近点从 RoboDK 树中按命名约定取（`GetApproachTarget`）
+  - **执行序列**（pick 侧）：`MoveJ(approach_pick)` → `MoveL(pick_target)` → `Grasp` → `MoveL(approach_pick)`
+  - **执行序列**（place 侧）：`MoveJ(approach_place)` → `MoveL(place_target)` → `Release` → `MoveL(approach_place)`
+  - `REQUIRED_PRIMITIVES = ['MoveJ', 'MoveL', 'Grasp', 'Release', 'GetApproachTarget']`
+  - `execute()` 和 `check()` 均返回 `SkillResult`（迁移掉 `CheckResult`）
+  - `check()` 验证：pick/place 目标存在、接近点存在、均可达
 
 ---
 
@@ -118,72 +84,60 @@
   - `TaskItem(skill: str, params: dict, description: str, expected_result: str)`
   - `TodoList(tasks: List[TaskItem])` — Planner 输出格式
   - 添加 `@field_validator` 检查 `skill` 值是否在已注册技能列表中
-  - ⚠️ **设计变更（2026-03-26）**：Planner 改为工具调用方式，不再直接输出 JSON。`TodoList` schema 可降级为内部验证工具（非 LLM 输出格式），`AutoTask`/`ManualTask` 已在 `graph_test.ipynb` 中定义。
 
-- [x] **3.2** `graph_test.ipynb` — **Planner 节点** *(2026-03-26，真实 LLM 实现)*
-  - ~~`with_structured_output(TodoList)`~~ ← 已废弃
-  - ✅ **实际采用**：`create_agent` + 动态工具调用方式
-    - 为每个已注册 Skill 生成 `add_<SkillName>_task` 工具（复用 `try_execute.args_schema`）
-    - 新增 `add_manual_task` 工具
-    - LLM 按顺序调用工具构建 `plan` 列表，返回后写入 `todo_list`
-  - ⚠️ **消息清理未实现**：Supervisor 阶段消息尚未 `RemoveMessage`
+- [ ] **3.2** 重写 `graph.py` — **Planner 节点**
+  - 使用 `claude-sonnet-4-6` + `with_structured_output(TodoList)`
+  - 系统提示：只处理符号/ID，输出合法 `TodoList`，可用技能列表从 `registry.list_skills()` 动态注入
+  - Retry 逻辑：Pydantic 校验失败时最多重试 3 次，失败则设 `halt_flag=True`
+  - 成功后：用 `RemoveMessage` **清除 Supervisor 阶段产生的全部消息**（防污染 Executor）
 
-- [x] **3.3** `graph_test.ipynb` — **Executor 节点** *(2026-03-26，完整实现)*
-  - 直接调用 `skill_registry[skill_name].try_execute(**params)` 执行 `current_task`
-  - 失败时进入 LLM 恢复循环（ReAct 内循环）；放弃时抛 `_EscalateHITLException(error_type, reason, suggestion)`
-  - 所有路径将 `SkillResult` 对象写入 `last_result`（类型已升为 `Optional[SkillResult]`）
-  - 消息清理（`RemoveMessage`）尚未实现，待 Phase 4 补充
+- [ ] **3.3** 重写 `graph.py` — **Executor 节点**
+  - 从 `registry.get_skill(current_task["skill"])` 动态加载技能实例
+  - 调用 `skill.execute(**current_task["params"])`，结果写入 `last_result`
+  - 若 skill 不存在：`last_result = {"success": False, "error_type": "UNKNOWN_SKILL", "needs_hilp": True}`
+  - 执行完成后：用 `RemoveMessage` 清除本轮 Executor 产生的 ToolMessage 噪音
+  - **自愈约定**（重要）：Executor 内部 ReAct 循环负责穷举恢复策略（换参数、换路径等）；
+    只有最终放弃时才退出节点并写入 `{"success": False, "needs_hilp": True, ...}`；
+    循环中间状态不写 `last_result` 不退出节点。
+    `needs_hilp=False + success=False` 的组合禁止从节点输出（语义死角，Context Flush 无法合理处理）。
 
-- [x] **3.4** `graph_test.ipynb` — **Supervisor 节点** *(2026-03-26，真实 LLM 实现)*
-  - ✅ 使用 `create_agent` + `SupervisorOutput` Pydantic schema（structured response）
-  - 工具集来自 `SkiLib/metatools/informative.py`（T-skills，只读场景查询）
-  - 可用技能列表由代码注入 system prompt（`_get_available_skills()`），LLM 只读取不生成
-  - ~~`create_react_agent`~~ 已废弃，改用新 API `create_agent`
+- [ ] **3.4** 重写 `graph.py` — **Supervisor 节点**
+  - 使用 `claude-sonnet-4-6` + LangChain `create_react_agent`
+  - 工具集：将 `task_skills.py` 中所有函数包装为 `@tool`（LangChain Tool）
+  - LLM schemas 从 `registry.get_llm_tool_schemas(format="anthropic")` 自动注入
+  - 终止条件：无 tool_call（知识饱和）或调用了 `request_human_intervention`
+  - 调用 `request_human_intervention` 后：**触发 `interrupt("human_intervention")`** 真正暂停图
 
-- [x] **3.5** `graph_test.ipynb` — **HITL stub 节点** *(2026-03-26，框架重构 + 行为修正)*
-  - 原单节点 `human_intervention` 已彻底拆分为：
-    - `manual_intervention_handler`：处理 `type="manual"` 任务，actions: `complete` / `abort`
-    - `hitl_handler`：处理执行失败，actions: `retry` / `next_task` / `replan` / `abort`
-  - 两个节点当前均为 stub（自动选择默认 action），**待实现 `interrupt()` 真正暂停**
-  - `hitl_handler` 新增 `replan` 路径（回到 supervisor 重规划），`next_task` 路径（跳过失败任务到 dispatcher）
-  - **行为修正（2026-03-26）**：
-    - `manual_intervention_handler`：`current_task` 清空改为 `{}`（原 `None`），补齐 `halt_flag/halt_reason` 清零
-    - `hitl_handler`：入口打印 `last_result` 诊断；全路径均清 `halt_flag`；`current_task` 应清空路径改为 `{}`
+- [ ] **3.5** 新建/重写 `graph.py` — **`human_intervention` 节点**
+  - 在图中增加此节点，接收两类入口：
+    - `context_flush` → `halt`（`halt_reason="TASK_FAILURE"`）
+    - `dispatcher` → `manual`（`halt_reason="MANUAL_TASK"`）
+  - 节点内调用 `interrupt({"halt_reason": ..., "current_task": ..., "todo_list": ...})`
+  - Resume 时通过 `Command(resume={"action": "retry"|"complete"|"abort"})` 恢复
+  - `action=retry`：清除 `halt_flag/halt_reason`，保留 `current_task`（Executor 重试）
+    - ❌ 对 `MANUAL_TASK` 非法，节点内强制降级为 `abort`
+  - `action=complete`：清除 `halt_flag/halt_reason`，清空 `current_task`（继续队列）
+    - 仅在 `halt_reason="MANUAL_TASK"` 时语义正确
+  - `action=abort`：清空 `current_task + todo_list`，清除 `halt_flag/halt_reason`
 
-- [x] **3.5.1** `graph_test.ipynb` — **Dispatcher 条件路由** *(2026-03-26)*
-  - `task_router` 条件函数：`"auto"` → `executor`；`"manual"` → `manual_intervention_handler`；`"END"` → END
-  - `post_task_router` 条件函数（executor 出边）：`"dispatcher"` / `"hitl_handler"` / `"END"`
-  - `manual_intervention_router` / `hitl_router` 各自独立
+- [ ] **3.5.1** `graph.py` — **Dispatcher 条件路由**
+  - 将 `dispatcher → executor` 静态边改为 `after_dispatcher` 条件函数
+  - `type="auto"` → `executor`；`type="manual"` → `human_intervention`；空槽+空队列 → `END`
+  - Dispatcher 节点本体：填入 manual 任务时同时设 `halt_flag=True`、`halt_reason="MANUAL_TASK"`
 
 - [ ] **3.5.2** `SkiLib/base.py` — **SkillResult.needs_hilp 字段**
   - 新增 `needs_hilp: bool = True`（已完成，见 base.py）
   - `to_llm_message()` 在 `success=False` 时输出 `needs_hilp`（已完成）
   - Phase 3 Executor ReAct 实现时：只有最终放弃时才退出节点，退出时 `needs_hilp=True`
 
-- [x] **3.5.3** `graph.py` — **GlobalState 新字段** *(2026-03-20)*
-  - `halt_reason: Optional[str]`（"TASK_FAILURE" | "MANUAL_TASK" | None）✅
-  - `_hi_action: Optional[str]`（内部路由，human_intervention → after_human_intervention）✅
+- [ ] **3.5.3** `graph.py` — **GlobalState 新字段**
+  - `halt_reason: Optional[str]`（"TASK_FAILURE" | "MANUAL_TASK" | None）
+  - `_hi_action: Optional[str]`（内部路由，human_intervention → after_human_intervention）
 
 - [ ] **3.5.4** `SkiLib/schemas.py` — **TaskItem 支持 manual 任务**
   - `type: Literal["auto", "manual"] = "auto"`
   - `type="manual"` 时 `skill` 可为空，`description` 为必填
   - Planner 系统提示补充：可输出 `type="manual"` 任务
-
-- [x] **3.5.5** `graph_test.ipynb` — **端到端 run cell** *(2026-03-26)*
-  - 含 `RobotContext` 初始化 + `graph.invoke(initial_state)` + 执行结果摘要打印
-  - 验证完整 Supervisor → Planner → Dispatcher → Executor → (HITL stub) 链路可跑通
-
-- [x] **3.5.6** `graph_test.ipynb` — **Planner 工具生成单元测试** *(2026-03-26)*
-  - 验证每个已注册 Skill 均生成了对应的 `add_<SkillName>_task` 工具
-  - 验证工具的 `args_schema` 与 `try_execute` 签名一致（Pydantic 模型字段对齐）
-
-- [ ] **3.5.7** `graph_test.ipynb` — **日志职责分离（Gradio / HITL interrupt 前置）**
-  > **必须在实现 `interrupt()` 真正暂停前完成**：interrupt 挂起后操作员界面需展示干净的执行日志；若 messages 仍混有 LLM 推理链，Gradio 无法安全消费。
-  - `messages` 职责收窄：仅用于 LLM Agent 推理链（supervisor 读取上下文），**不再由 executor / planner / hitl_handler 写入状态摘要 AIMessage**
-  - `execution_log` 成为唯一展示渠道：补全 supervisor / planner 节点的写入，格式统一为 `"[节点名] 内容"`
-  - executor 当前对同一事件双写（`execution_log` + `messages` AIMessage）的冗余写入删除 messages 侧
-  - hitl_handler `replan` 路径向 messages 写 `HumanMessage` 触发重规划的行为**保留**（这是 LLM 推理输入，不是展示日志）
-  - 验证：`execution_log` 一次完整运行后覆盖 supervisor → planner → dispatcher → executor → hitl/manual 全链路
 
 - [ ] **3.6** 重写 `SkiLib/main.py`
   - `RobotContext()` 初始化（一次，进程生命周期内保活）
@@ -197,7 +151,7 @@
 
 - [ ] **4.1** 端到端仿真测试（RoboDK 仿真模式，不连接真机）
   - 用例 1：正常指令 "将 Part_A 装入 Tray_1" → Supervisor 查树 → Planner 生成 todo_list → PickAndPlace 执行完整序列
-  - 用例 2：目标名称错误 → `GetApproachTarget` 返回 `NO_APPROACH_TARGET` → Executor 失败 → HITL 暂停 → 操作员 abort
+  - 用例 2：目标名称错误 → `GetApproachTarget` 返回 `NO_APPROACH_TARGET` → Executor 失败 → HILP 暂停 → 操作员 abort
   - 用例 3：模糊指令 → Supervisor 调用 `request_human_intervention` → 图暂停 → 操作员补充信息 → resume
 
 - [ ] **4.2** `SkillResult` 迁移扫描
@@ -209,7 +163,7 @@
   - 确认 Context Flush 后 Executor `ToolMessage` 已被清除
   - 测试长序列（10 个任务）时消息列表不膨胀
 
-- [ ] **4.5** 端到端 HITL 路径验证（新增）
+- [ ] **4.5** 端到端 HILP 路径验证（新增）
   - 用例 4：Planner 输出含 `type="manual"` 任务 → Dispatcher 识别 → `interrupt` 暂停
     → 操作员发 `complete` → Dispatcher 继续剩余自动任务（全程无 halt_flag 残留）
   - 用例 5：Executor 失败（`needs_hilp=True`）→ `halt_reason="TASK_FAILURE"` → 操作员发 `retry`
@@ -226,37 +180,33 @@
 
 *将全库所有 `print()` 替换为结构化 logging，同时输出到控制台和日志文件。*
 
-- [x] **5.1** 新建 `SkiLib/log.py`：统一 Logger 工厂 *(2026-03-17，提前实现)*
+- [ ] **5.1** 新建 `SkiLib/log.py`：统一 Logger 工厂
   - `get_logger(name: str) -> logging.Logger`：返回已配置的模块级 logger
   - 两个 Handler：`StreamHandler`（控制台，同步 `print` 原有行为）+ `RotatingFileHandler`（写入 `logs/roboski.log`，单文件 10 MB，保留 5 份）
   - 格式：`%(asctime)s [%(levelname)s] %(name)s — %(message)s`
   - 日志级别通过环境变量 `ROBOSKI_LOG_LEVEL`（默认 `INFO`）控制，无需改代码切换
   - 首次 import `SkiLib` 时自动完成根 logger 配置（放入 `SkiLib/__init__.py`）
 
-- [ ] **5.2** `SkiLib/graph.py` 迁移（stub 阶段大量 `print()`，待 Phase 3 重写时一并完成）
+- [ ] **5.2** `SkiLib/graph.py` 迁移
   - 模块顶部：`logger = get_logger("graph")`
   - 各节点 `print()` → `logger.info()` / `logger.debug()` / `logger.warning()`
   - 级别约定：
-    - `INFO`：节点入口/出口、任务 dispatch、HITL 触发
+    - `INFO`：节点入口/出口、任务 dispatch、HILP 触发
     - `DEBUG`：Supervisor 每次 tool_call 详情、Executor 内部重试
     - `WARNING`：保守 fallthrough（`needs_hilp=False + success=False`）、manual 任务 retry 降级
     - `ERROR`：Planner retry 耗尽、未知 skill
 
-- [x] **5.3** `SkiLib/primitives/` 迁移 *(2026-03-20)*
-  - `gripper.py`：已完成，`get_logger(__name__)` + 全部 `logger.*` 调用
-  - `motion.py`：无 `print()` 残留，暂无 logger 调用（纯计算分支，后续按需补充）
+- [ ] **5.3** `SkiLib/primitives/` 迁移
+  - 各 primitive 模块顶部：`logger = get_logger("primitives.<module_name>")`
+  - `execute()` 和 `check()` 中的 `print()` → `logger.debug()`
+  - 异常捕获处：`logger.error(..., exc_info=True)` 保留 traceback（不上抛）
 
-- [x] **5.4** `SkiLib/skills/` 迁移 *(2026-03-20)*
-  - `pick_and_place.py`：已完成，`get_logger(__name__)` + 8 步执行日志均用 `logger.info()`
-  - `dummy_skills.py`：测试桩文件，保留 `print()`（非生产代码）
+- [ ] **5.4** `SkiLib/skills/` 迁移
+  - 同 5.3，logger 命名空间：`"skills.<module_name>"`
 
 - [ ] **5.5** `SkiLib/robotcontext.py` 迁移
-  - 三处 `print()` 待迁移（`PrimitiveRegistry` 扫描/注册日志）
   - RoboDK 连接成功/失败：`logger.info()` / `logger.error()`
-
-- [ ] **5.5.1** `SkiLib/utils.py` 迁移
-  - 三处 `print()` 在异常捕获块内（IK solving、singularity check、manipulability）
-  - 改为 `logger.error(..., exc_info=True)`
+  - Registry 扫描结果：`logger.debug()`
 
 - [ ] **5.6** Notebook (`Agent/LangGraph.ipynb`) 迁移
   - 保留 `logging.basicConfig(level=logging.INFO)` 初始化 cell
@@ -273,24 +223,19 @@
 
 | 文件 | 状态 | Phase |
 |------|------|-------|
-| `SkiLib/log.py` | ✅ 完成 | 5.1 |
-| `SkiLib/registry.py` | ✅ 完成 | 0.1 |
-| `SkiLib/decorators.py` | ✅ 不建（见 0.2 决策） | 0.2 |
-| `SkiLib/__init__.py` | ✅ 完成 | 0.3 |
-| `SkiLib/robotcontext.py` | ⚠️ 完成，3处 print() 待迁移 | 0.4 / 5.5 |
-| `SkiLib/base.py` | ✅ 完成（SkillResult, TOOL_METHODS, as_tools(), require_robot_active） | — |
-| `SkiLib/primitives/motion.py` | ✅ 完成（MoveJ + MoveL，含 check()） | 2.1 |
-| `SkiLib/primitives/gripper.py` | ✅ 完成（Grasp + Release，expected_item） | 2.2 |
-| `SkiLib/skills/pick_and_place.py` | ✅ 完成（8步序列，显式接近点参数） | 2.3 |
-| `SkiLib/utils.py` | ⚠️ 有 print()，待迁移 | 5.5.1 |
-| `SkiLib/primitives/scene_query.py` | ❌ 待建 | 1.1 |
-| `SkiLib/skills/task_skills.py` | ❌ 待建 | 1.2 |
-| `SkiLib/specs/example_assembly.yaml` | ❌ 待建 | 1.3 |
-| `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
-| `SkiLib/metatools/informative.py` | ✅ 完成（T-skills: list_targets/objects/tools, check_item_exists, get_gripper_state） | 新增 |
-| `Agent/notebooks/graph_test.ipynb` | ⚠️ Supervisor✅ Planner✅ Dispatcher✅ Executor✅ HITL行为修正✅ interrupt缺失⚠️ | 3.2–3.5.6 |
-| `SkiLib/graph.py` | ⚠️ stub（旧版，已被 graph_test.ipynb 超越）；待迁移或废弃 | — |
-| `SkiLib/main.py` | ⚠️ 调试用，待重写 | 3.6 |
+| `SkiLib/registry.py` | 待建 | 0.1 |
+| `SkiLib/decorators.py` | 待建 | 0.2 |
+| `SkiLib/__init__.py` | 待更新 | 0.3 |
+| `SkiLib/robotcontext.py` | 待更新 | 0.4 |
+| `SkiLib/primitives/scene_query.py` | 待建 | 1.1 |
+| `SkiLib/skills/task_skills.py` | 待建 | 1.2 |
+| `SkiLib/specs/example_assembly.yaml` | 待建 | 1.3 |
+| `SkiLib/primitives/motion.py` | 待更新 | 2.1 |
+| `SkiLib/primitives/gripper.py` | 待建 | 2.2 |
+| `SkiLib/skills/pick_and_place.py` | 待重写 | 2.3 |
+| `SkiLib/schemas.py` | 待建 | 3.1 |
+| `SkiLib/graph.py` | 待重写 | 3.2–3.5 |
+| `SkiLib/main.py` | 待重写 | 3.6 |
 
 ---
 
