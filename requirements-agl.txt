@@ -1,0 +1,9 @@
+vllm==0.10.2
+verl==0.5.0
+poml
+langgraph
+langchain
+langchain-openai
+agentlightning
+flash_attn
+nest_asyncio

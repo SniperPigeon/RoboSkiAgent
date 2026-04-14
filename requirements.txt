@@ -8,7 +8,9 @@ langchain-huggingface
 transformers 
 accelerate 
 bitsandbytes
+openai
 langchain[huggingface]
+langchain[openai]
 langchain-anthropic
 huggingface_hub[hf_xet]
 python-dotenv
