@@ -76,6 +76,49 @@ RoboSkiAgent/
 
 系统采用 **Plan-and-Execute** 多智能体状态机，分两层：
 
+```mermaid
+flowchart TD
+    START(["▶ START"]) --> supervisor
+
+    supervisor["🔍 Supervisor\nReAct · T-skills · knowledge saturation"]
+    supervisor --> planner
+
+    planner["📋 Planner\ndynamic tool calls · build todo_list"]
+    planner --> plan_review
+
+    plan_review{{"⏸ Plan Review\napprove / replan / abort"}}
+    plan_review -->|approve| dispatcher
+    plan_review -->|"replan + feedback"| supervisor
+    plan_review -->|abort| END1(["⏹ END"])
+
+    dispatcher["⚙️ Dispatcher\npop slot · route by task.type"]
+    dispatcher -->|"type = auto"| executor
+    dispatcher -->|"type = manual"| manual_intervention_handler
+    dispatcher -->|"todo empty"| END2(["⏹ END"])
+
+    executor["🤖 Executor\ntry_execute → LLM recovery → escalate"]
+    executor -->|success| dispatcher
+    executor -->|"failure + escalate"| hitl_handler
+
+    manual_intervention_handler{{"⏸ Manual Handler\ncomplete / abort"}}
+    manual_intervention_handler -->|complete| dispatcher
+    manual_intervention_handler -->|abort| END3(["⏹ END"])
+
+    hitl_handler{{"⏸ HITL Handler\nretry / next_task / replan / abort"}}
+    hitl_handler -->|retry| executor
+    hitl_handler -->|next_task| dispatcher
+    hitl_handler -->|replan| supervisor
+    hitl_handler -->|abort| END4(["⏹ END"])
+
+    style plan_review fill:#fef3c7,stroke:#f59e0b
+    style manual_intervention_handler fill:#fef3c7,stroke:#f59e0b
+    style hitl_handler fill:#fef3c7,stroke:#f59e0b
+    style supervisor fill:#dbeafe,stroke:#3b82f6
+    style planner fill:#dbeafe,stroke:#3b82f6
+    style executor fill:#dbeafe,stroke:#3b82f6
+    style dispatcher fill:#d1fae5,stroke:#10b981
+```
+
 ### Layer 1 · 调研与规划层
 
 **Supervisor**

@@ -1,7 +1,7 @@
 # RoboSkiAgent 实现 Checklist
 
 > 按依赖顺序排列。每阶段完成后再进入下一阶段。
-> 最后更新：2026-03-13
+> 最后更新：2026-03-30（Phase 6 迁移完成：Agent/ 包生产化，CLI 入口，prompts/ 目录；CLI interrupt handling 标注为待实现）
 
 ---
 
@@ -91,34 +91,34 @@
   - Retry 逻辑：Pydantic 校验失败时最多重试 3 次，失败则设 `halt_flag=True`
   - 成功后：用 `RemoveMessage` **清除 Supervisor 阶段产生的全部消息**（防污染 Executor）
 
-- [ ] **3.3** 重写 `graph.py` — **Executor 节点**
-  - 从 `registry.get_skill(current_task["skill"])` 动态加载技能实例
-  - 调用 `skill.execute(**current_task["params"])`，结果写入 `last_result`
-  - 若 skill 不存在：`last_result = {"success": False, "error_type": "UNKNOWN_SKILL", "needs_hilp": True}`
-  - 执行完成后：用 `RemoveMessage` 清除本轮 Executor 产生的 ToolMessage 噪音
-  - **自愈约定**（重要）：Executor 内部 ReAct 循环负责穷举恢复策略（换参数、换路径等）；
-    只有最终放弃时才退出节点并写入 `{"success": False, "needs_hilp": True, ...}`；
-    循环中间状态不写 `last_result` 不退出节点。
-    `needs_hilp=False + success=False` 的组合禁止从节点输出（语义死角，Context Flush 无法合理处理）。
+- [x] **3.3** `graph_test.ipynb` — **Executor 节点** *(2026-03-26，完整实现)*
+  - 直接调用 `skill_registry[skill_name].try_execute(**params)` 执行 `current_task`
+  - 失败时进入 LLM 恢复循环（ReAct 内循环）；放弃时抛 `_EscalateHITLException(error_type, reason, suggestion)`
+  - 所有路径将 `SkillResult` 对象写入 `last_result`（类型已升为 `Optional[SkillResult]`）
+  - 消息清理（`RemoveMessage`）尚未实现，待 Phase 4 补充
 
-- [ ] **3.4** 重写 `graph.py` — **Supervisor 节点**
-  - 使用 `claude-sonnet-4-6` + LangChain `create_react_agent`
-  - 工具集：将 `task_skills.py` 中所有函数包装为 `@tool`（LangChain Tool）
-  - LLM schemas 从 `registry.get_llm_tool_schemas(format="anthropic")` 自动注入
-  - 终止条件：无 tool_call（知识饱和）或调用了 `request_human_intervention`
-  - 调用 `request_human_intervention` 后：**触发 `interrupt("human_intervention")`** 真正暂停图
+- [x] **3.4** `graph_test.ipynb` — **Supervisor 节点** *(2026-03-26，真实 LLM 实现)*
+  - ✅ 使用 `create_agent` + `SupervisorOutput` Pydantic schema（structured response）
+  - 工具集来自 `SkiLib/metatools/informative.py`（T-skills，只读场景查询）
+  - 可用技能列表由代码注入 system prompt（`_get_available_skills()`），LLM 只读取不生成
+  - ~~`create_react_agent`~~ 已废弃，改用新 API `create_agent`
 
-- [ ] **3.5** 新建/重写 `graph.py` — **`human_intervention` 节点**
-  - 在图中增加此节点，接收两类入口：
-    - `context_flush` → `halt`（`halt_reason="TASK_FAILURE"`）
-    - `dispatcher` → `manual`（`halt_reason="MANUAL_TASK"`）
-  - 节点内调用 `interrupt({"halt_reason": ..., "current_task": ..., "todo_list": ...})`
-  - Resume 时通过 `Command(resume={"action": "retry"|"complete"|"abort"})` 恢复
-  - `action=retry`：清除 `halt_flag/halt_reason`，保留 `current_task`（Executor 重试）
-    - ❌ 对 `MANUAL_TASK` 非法，节点内强制降级为 `abort`
-  - `action=complete`：清除 `halt_flag/halt_reason`，清空 `current_task`（继续队列）
-    - 仅在 `halt_reason="MANUAL_TASK"` 时语义正确
-  - `action=abort`：清空 `current_task + todo_list`，清除 `halt_flag/halt_reason`
+- [x] **3.5** `graph_test.ipynb` — **plan_review 节点** *(2026-03-27)*
+  - interrupt 结构审批门：`approve` → dispatcher；`replan` → supervisor；`abort` → END
+  - 向操作员展示完整 `todo_list` 摘要（task_id / type / skill or description）
+  - `replan` 路径：resume payload 为 `{"action": "replan", "feedback": "..."}`，写入 `HumanMessage` + 清空 `todo_list`
+  - `plan_review_action` 字段已加入 `GlobalState`
+  - ⚠️ **待修**：Planner system prompt 仍残留"在计划前插入 manual task"规则，导致 approve 后多弹一次 complete/abort
+
+- [x] **3.5** `graph_test.ipynb` — **HITL stub 节点** *(2026-03-26，框架重构 + 行为修正)*
+  - 原单节点 `human_intervention` 已彻底拆分为：
+    - `manual_intervention_handler`：处理 `type="manual"` 任务，actions: `complete` / `abort`
+    - `hitl_handler`：处理执行失败，actions: `retry` / `next_task` / `replan` / `abort`
+  - 两个节点当前均为 stub（自动选择默认 action），**待实现 `interrupt()` 真正暂停**
+  - `hitl_handler` 新增 `replan` 路径（回到 supervisor 重规划），`next_task` 路径（跳过失败任务到 dispatcher）
+  - **行为修正（2026-03-26）**：
+    - `manual_intervention_handler`：`current_task` 清空改为 `{}`（原 `None`），补齐 `halt_flag/halt_reason` 清零
+    - `hitl_handler`：入口打印 `last_result` 诊断；全路径均清 `halt_flag`；`current_task` 应清空路径改为 `{}`
 
 - [ ] **3.5.1** `graph.py` — **Dispatcher 条件路由**
   - 将 `dispatcher → executor` 静态边改为 `after_dispatcher` 条件函数
@@ -206,7 +206,40 @@
 
 - [ ] **5.5** `SkiLib/robotcontext.py` 迁移
   - RoboDK 连接成功/失败：`logger.info()` / `logger.error()`
-  - Registry 扫描结果：`logger.debug()`
+
+- [ ] **5.5.1** `SkiLib/utils.py` 迁移
+  - 三处 `print()` 在异常捕获块内（IK solving、singularity check、manipulability）
+  - 改为 `logger.error(..., exc_info=True)`
+
+---
+
+## Phase 6 · Notebook → 生产代码迁移
+*将 `graph_test.ipynb` 中验证通过的逻辑迁移为可独立运行的 .py 文件；提升可维护性和可测试性*
+> 最后更新：2026-03-30（迁移完成）
+
+- [x] **6.1** 抽取 Prompt 到 `Agent/prompts/` 目录 *(2026-03-30)*
+  - `supervisor.txt` / `planner.txt` / `executor.txt`（纯文本，运行时 `.format()` 注入）
+  - 节点内通过 `_load_prompt(name)` 读取，路径相对于 `nodes/` 解析
+
+- [x] **6.2** 迁移 `GlobalState` 及节点函数到独立 `.py` 文件 *(2026-03-30)*
+  - `Agent/state.py`：`GlobalState` TypedDict
+  - `Agent/nodes/`：supervisor / planner / plan_review / dispatcher / executor / manual_handler / hitl_handler
+  - 路由函数随各节点文件一并迁移（`task_router` / `post_task_router` 等）
+  - `Agent/graph.py`：`build_graph()` + `make_initial_state()`，含 `MemorySaver` + `JsonPlusSerializer`
+  - 保持 `Agent → SkiLib` 单向依赖
+
+- [x] **6.3** Gradio GUI 迁移到 `Agent/gui.py` *(2026-03-30)*
+  - `start_flow` / `handle_choice` / `_check_for_interrupt` 完整迁移
+  - `python -m Agent.gui` 直接启动
+
+- [x] **6.4** CLI 入口 `Agent/__main__.py` *(2026-03-30)*
+  - `python -m Agent "<指令>"` 可调用图执行
+  - 支持 `--skip-check` bypass 模式
+
+- [ ] **6.5** CLI interrupt handling ⚠️ **尚未实现**
+  - 当前 `__main__.py` 使用 `graph.invoke()`，遇到任意 `interrupt()` 节点（`plan_review` / `hitl_handler` / `manual_intervention_handler`）会抛出 `NodeInterrupt` 异常，导致 CLI 无法完成含人工审批的完整流程
+  - **解决方案**：改用 `graph.stream()` + 捕获 `GraphInterrupt`，提示操作员输入后调用 `graph.invoke(Command(resume=...))` 恢复
+  - **现状**：GUI（`Agent/gui.py`）已实现完整 interrupt 处理，推荐使用 GUI
 
 - [ ] **5.6** Notebook (`Agent/LangGraph.ipynb`) 迁移
   - 保留 `logging.basicConfig(level=logging.INFO)` 初始化 cell
@@ -223,19 +256,31 @@
 
 | 文件 | 状态 | Phase |
 |------|------|-------|
-| `SkiLib/registry.py` | 待建 | 0.1 |
-| `SkiLib/decorators.py` | 待建 | 0.2 |
-| `SkiLib/__init__.py` | 待更新 | 0.3 |
-| `SkiLib/robotcontext.py` | 待更新 | 0.4 |
-| `SkiLib/primitives/scene_query.py` | 待建 | 1.1 |
-| `SkiLib/skills/task_skills.py` | 待建 | 1.2 |
-| `SkiLib/specs/example_assembly.yaml` | 待建 | 1.3 |
-| `SkiLib/primitives/motion.py` | 待更新 | 2.1 |
-| `SkiLib/primitives/gripper.py` | 待建 | 2.2 |
-| `SkiLib/skills/pick_and_place.py` | 待重写 | 2.3 |
-| `SkiLib/schemas.py` | 待建 | 3.1 |
-| `SkiLib/graph.py` | 待重写 | 3.2–3.5 |
-| `SkiLib/main.py` | 待重写 | 3.6 |
+| `SkiLib/log.py` | ✅ 完成 | 5.1 |
+| `SkiLib/registry.py` | ✅ 完成 | 0.1 |
+| `SkiLib/decorators.py` | ✅ 不建（见 0.2 决策） | 0.2 |
+| `SkiLib/__init__.py` | ✅ 完成 | 0.3 |
+| `SkiLib/robotcontext.py` | ⚠️ 完成，3处 print() 待迁移 | 0.4 / 5.5 |
+| `SkiLib/base.py` | ✅ 完成（SkillResult, TOOL_METHODS, as_tools(), require_robot_active） | — |
+| `SkiLib/primitives/motion.py` | ✅ 完成（MoveJ + MoveL，含 check()） | 2.1 |
+| `SkiLib/primitives/gripper.py` | ✅ 完成（Grasp + Release，expected_item） | 2.2 |
+| `SkiLib/skills/pick_and_place.py` | ✅ 完成（8步序列，显式接近点参数） | 2.3 |
+| `SkiLib/utils.py` | ⚠️ 有 print()，待迁移 | 5.5.1 |
+| `SkiLib/primitives/scene_query.py` | ❌ 待建 | 1.1 |
+| `SkiLib/skills/task_skills.py` | ❌ 待建 | 1.2 |
+| `SkiLib/specs/example_assembly.yaml` | ❌ 待建 | 1.3 |
+| `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
+| `SkiLib/metatools/informative.py` | ✅ 完成（T-skills: list_targets/objects/tools, check_item_exists, get_gripper_state） | 新增 |
+| `Agent/state.py` | ✅ 完成（GlobalState TypedDict） | 6.2 |
+| `Agent/graph.py` | ✅ 完成（build_graph + make_initial_state） | 6.2 |
+| `Agent/llm.py` | ✅ 完成（claude / ollama 工厂） | 6.2 |
+| `Agent/gui.py` | ✅ 完成（Gradio，完整 interrupt 支持） | 6.3 |
+| `Agent/__main__.py` | ⚠️ 完成，CLI interrupt handling 未实现（见 6.5） | 6.4 |
+| `Agent/prompts/` | ✅ 完成（supervisor.txt / planner.txt / executor.txt） | 6.1 |
+| `Agent/nodes/` | ✅ 完成（7 个节点均已迁移） | 6.2 |
+| `Agent/notebooks/graph_test.ipynb` | 参考文档（核心逻辑已迁移至 Agent/ 包） | — |
+| `SkiLib/graph.py` | ⚠️ 错位文件（含 LangGraph 依赖，违反 SkiLib 约束）；待废弃 | — |
+| `SkiLib/main.py` | ⚠️ 调试用，待重写 | 3.6 |
 
 ---
 

@@ -1,350 +1,228 @@
-# RoboSkiAgent 架构图与控制流图
+# RoboSkiAgent — Architecture Diagrams
+
+> Last updated: 2026-03-30 (rewritten to reflect Phase 6 production code)
+>
+> Four levels of detail — use the level that matches your audience.
 
 ---
 
-## 1. 系统整体分层架构
+## Level 1 · System Overview
+
+High-level: what the system receives, what it produces, who is involved.
+
+```mermaid
+flowchart LR
+    U(["👤 Operator"])
+    U -->|"Natural language\ninstruction"| AG
+
+    subgraph AG["Agent Layer · LangGraph"]
+        direction TB
+        S["🔍 Supervisor"] --> P["📋 Planner"]
+        P --> PR["⏸ Plan Review"]
+        PR --> D["⚙️ Dispatcher"]
+        D -->|auto| E["🤖 Executor"]
+        D -->|manual| MH["⏸ Manual Handler"]
+        E -->|failure| HH["⏸ HITL Handler"]
+    end
+
+    AG -->|"skill.try_execute()"| SL["SkiLib\nPickAndPlace · MoveJ/L · Grasp/Release"]
+    SL -->|"RoboDK API"| R(["🤖 RoboDK"])
+    U <-.->|"approve / retry / replan"| PR & MH & HH
+```
+
+---
+
+## Level 2 · LangGraph State Machine
+
+All nodes, edges, and HITL interrupt gates (⏸ = `langgraph.interrupt()`).
+
+```mermaid
+flowchart TD
+    START(["▶ START"]) --> supervisor
+
+    supervisor["🔍 Supervisor\nReAct loop · T-skill queries\nknowledge saturation → SupervisorOutput"]
+    supervisor --> planner
+
+    planner["📋 Planner\ndynamic add_&lt;Skill&gt;_task tools\nLLM builds todo_list via tool calls"]
+    planner --> plan_review
+
+    plan_review{{"⏸ Plan Review\nshows full todo_list summary\napprove / replan / abort"}}
+    plan_review -->|approve| dispatcher
+    plan_review -->|"replan\n+ feedback → HumanMessage"| supervisor
+    plan_review -->|abort| END1(["⏹ END"])
+
+    dispatcher["⚙️ Dispatcher  (pure code)\npop slot only when current_task = {}\nroute by task.type"]
+    dispatcher -->|"type = auto"| executor
+    dispatcher -->|"type = manual\nhalt_flag = True"| manual_intervention_handler
+    dispatcher -->|"todo_list empty"| END2(["⏹ END"])
+
+    executor["🤖 Executor\n1. skill.try_execute(**params)\n2. LLM recovery loop on failure\n3. escalate_to_hitl if unrecoverable"]
+    executor -->|"SkillResult.success = True\nclear current_task"| dispatcher
+    executor -->|"_EscalateHITLException\nhalt_flag = True"| hitl_handler
+
+    manual_intervention_handler{{"⏸ Manual Handler\ntask.description shown to operator\ncomplete / abort"}}
+    manual_intervention_handler -->|"complete\nclear current_task"| dispatcher
+    manual_intervention_handler -->|abort| END3(["⏹ END"])
+
+    hitl_handler{{"⏸ HITL Handler\nshows error_type + suggestion\nretry / next_task / replan / abort"}}
+    hitl_handler -->|"retry\nkeep current_task"| executor
+    hitl_handler -->|"next_task\nclear current_task"| dispatcher
+    hitl_handler -->|"replan\nclear todo_list → HumanMessage"| supervisor
+    hitl_handler -->|"abort\nclear all"| END4(["⏹ END"])
+
+    style plan_review              fill:#fef3c7,stroke:#f59e0b
+    style manual_intervention_handler fill:#fef3c7,stroke:#f59e0b
+    style hitl_handler             fill:#fef3c7,stroke:#f59e0b
+    style supervisor               fill:#dbeafe,stroke:#3b82f6
+    style planner                  fill:#dbeafe,stroke:#3b82f6
+    style executor                 fill:#dbeafe,stroke:#3b82f6
+    style dispatcher               fill:#d1fae5,stroke:#10b981
+```
+
+---
+
+## Level 3 · SkiLib Internal Layers
+
+Dependency flow from Agent down to RoboDK API calls.
 
 ```mermaid
 graph TB
-    subgraph INPUT["Input Layer"]
-        NL["Natural language instruction<br/>e.g. 'Assemble Part_A into Tray_1'"]
+    subgraph Agent["Agent Layer (LangGraph)"]
+        EXE["🤖 Executor"]
+        SUP["🔍 Supervisor"]
     end
 
-    subgraph LAYER1["Layer 1 · Planning Layer (LLM-driven)"]
-        direction LR
-        SUP["🧠 Supervisor<br/>────────────────<br/>ReAct loop<br/>Use Task-Skills to resolve ambiguity<br/>Only handles symbols/IDs<br/>❌ Do not compute coordinates"]
-        PLAN["📋 Planner<br/>────────────────<br/>Structured output<br/>Generate todo_list JSON<br/>Validation + Retry (×3)<br/>❌ No vague descriptions"]
-        SUP -->|"Knowledge saturation / HILP"| PLAN
+    subgraph SkiLib["SkiLib · Skill Library  (zero LangGraph dependency)"]
+        subgraph Reg["Registry / Context"]
+            SR["SkillRegistry\nauto-scans skills/\nexposes get_tools()"]
+            RC["RobotContext\nRoboDK connection singleton\ninjects robot + RDK"]
+        end
+        subgraph Skills["Skills Layer  ❌ no robodk import"]
+            PaP["PickAndPlace\n8-step sequence\nREQUIRED_PRIMITIVES declared"]
+        end
+        subgraph Prims["Primitives Layer  ✅ robodk import"]
+            MJ["MoveJ\njoint motion"] & ML["MoveL\nlinear motion"]
+            GR["Grasp\nAttachClosest"] & RE["Release\nDetachAll"]
+        end
     end
 
-    subgraph LAYER2["Layer 2 · Execution Layer (Deterministic + LLM)"]
-        direction LR
-        DISP["⚙️ Dispatcher<br/>────────────────<br/>Code only, no LLM<br/>Only when current_task={}<br/>pop(0) into execution slot"]
-        EXEC["🤖 Executor<br/>────────────────<br/>Dynamically loads Skill<br/>Calls skill.execute()<br/>Writes last_result"]
-        FLUSH["🧹 Context Flush<br/>────────────────<br/>Code only, no LLM<br/>Success → clear slot<br/>Failure → set halt_flag"]
-        DISP --> EXEC --> FLUSH
-    end
+    RDK(["🤖 RoboDK"])
 
-    subgraph HILP["Human Intervention Layer (HILP)"]
-        HI["👤 Human Intervention<br/>────────────────<br/>interrupt() pauses the graph<br/>Wait for retry / abort<br/>Command(resume=...)"]
-    end
+    EXE -->|"get_skill(name)"| SR
+    SUP -->|"get_tools() — T-skills\n(metatools/informative.py)"| SR
+    SR -->|"instantiates via\nREQUIRED_PRIMITIVES"| PaP
+    PaP -->|uses| MJ & ML & GR & RE
+    RC -->|"injects context at startup"| MJ & ML & GR & RE
+    MJ & ML & GR & RE -->|"RoboDK API"| RDK
 
-    subgraph SKILIB["SkiLib Skill Library"]
-        direction TB
-        SKILLS["Skills (high-level, platform-agnostic)<br/>PickAndPlace / TaskSkills"]
-        PRIMS["Primitives (low-level, RoboDK-related)<br/>MoveJ / MoveL / Grasp / Release / SceneQuery"]
-        REG["SkillRegistry (singleton)<br/>@skill decorator auto-registers<br/>Dynamically generates LLM Tool Schema"]
-        CTX["RobotContext (singleton)<br/>RoboDK connection management<br/>get_current_state()"]
-        SKILLS --> PRIMS
-        REG --> SKILLS
-        CTX --> PRIMS
-    end
-
-    NL --> SUP
-    PLAN -->|"todo_list"| DISP
-    FLUSH -->|"halt_flag=True"| HI
-    HI -->|"retry → keep current_task"| EXEC
-    HI -->|"abort → clear queue"| FLUSH
-    EXEC <-->|"skill.execute()"| SKILIB
-    SUP <-->|"task-skills query"| SKILIB
+    style Agent  fill:#dbeafe,stroke:#3b82f6
+    style Skills fill:#d1fae5,stroke:#10b981
+    style Prims  fill:#fce7f3,stroke:#ec4899
+    style Reg    fill:#fef3c7,stroke:#f59e0b
 ```
 
 ---
 
-## 2. Agent 控制流状态机
+## Level 4 · Single Task Execution Sequence
 
-> [2026-03-13 更新] 新增 manual 任务路径（Dispatcher → HumanIntervention）、needs_hilp 检查、`complete` 动作
+End-to-end trace for one `PickAndPlace` task, including failure/recovery branch.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Supervisor : Receive natural language instruction
+sequenceDiagram
+    actor Op as 👤 Operator
+    participant SUP as Supervisor
+    participant PLAN as Planner
+    participant PR as Plan Review ⏸
+    participant DISP as Dispatcher
+    participant EXE as Executor
+    participant PaP as PickAndPlace (SkiLib)
+    participant RDK as RoboDK
 
-    state Supervisor {
-        [*] --> ReActLoop
-        ReActLoop --> ReActLoop : tool_call (query scene/spec)
-        ReActLoop --> [*] : no tool_call (knowledge saturation)
-        ReActLoop --> HILP_Trigger : call request_human_intervention
-    }
+    Op->>SUP: "Place Part_A on Tray_1"
 
-    Supervisor --> Planner : knowledge saturation
-    HILP_Trigger --> HumanIntervention : interrupt
+    Note over SUP: ReAct loop — knowledge saturation
+    SUP->>RDK: list_targets()
+    RDK-->>SUP: ["Part_A_Pick", "Approach_Part_A_Pick", "Tray_1_Place", ...]
+    SUP->>RDK: list_objects()
+    RDK-->>SUP: ["Part_A"]
+    SUP->>PLAN: SupervisorOutput {task_intent, scene}
 
-    state Planner {
-        [*] --> StructuredOutput
-        StructuredOutput --> Retry : Pydantic validation failed
-        Retry --> StructuredOutput : retry (up to 3 times)
-        StructuredOutput --> [*] : validation passed (supports mixed auto/manual)
-        Retry --> HaltPlanning : retries exhausted
-    }
-    HaltPlanning --> HumanIntervention
+    Note over PLAN: dynamic tool calls
+    PLAN->>PLAN: add_PickAndPlace_task(pick_target="Part_A_Pick",\nplace_target="Tray_1_Place", ...)
+    PLAN->>PR: todo_list = [t1: PickAndPlace]
 
-    Planner --> FlushSupervisorMsg : clear Supervisor messages
-    FlushSupervisorMsg --> Dispatcher
+    PR-->>Op: ⏸ Plan summary shown
+    Op->>PR: "approve"
+    PR->>DISP: approved
 
-    state ExecutionLoop {
-        state Dispatcher {
-            [*] --> CheckSlot
-            CheckSlot --> PopTask : current_task == {}
-            CheckSlot --> SkipPop : current_task != {}
-            PopTask --> CheckType
-            CheckType --> AutoPath : type != manual
-            CheckType --> ManualPath : type == manual\nhalt_flag=T, halt_reason=MANUAL_TASK
-            SkipPop --> [*]
-            AutoPath --> [*]
-            ManualPath --> [*]
-        }
+    DISP->>EXE: current_task = {skill: PickAndPlace, params: ...}
+    EXE->>PaP: try_execute(pick_target, place_target, pick_approach, place_approach)
 
-        Dispatcher --> Executor : after_dispatcher=auto
-        Dispatcher --> HumanIntervention : after_dispatcher=manual
+    Note over PaP: 8-step execution sequence
+    PaP->>RDK: MoveL → Approach_Part_A_Pick
+    PaP->>RDK: MoveL → Part_A_Pick
+    PaP->>RDK: Grasp  (AttachClosest)
+    PaP->>RDK: MoveL → Approach_Part_A_Pick  (retract)
+    PaP->>RDK: MoveL → Approach_Tray_1_Place (transit)
+    PaP->>RDK: MoveL → Tray_1_Place
+    PaP->>RDK: Release (DetachAll)
+    PaP->>RDK: MoveL → Approach_Tray_1_Place (retract)
+    PaP-->>EXE: SkillResult(success=True)
 
-        state Executor {
-            [*] --> ReActLoop2
-            ReActLoop2 --> ReActLoop2 : internal recovery retries
-            ReActLoop2 --> WriteSuccess : success
-            ReActLoop2 --> WriteFailHILP : give up needs_hilp=True
-            WriteSuccess --> [*]
-            WriteFailHILP --> [*]
-        }
+    EXE-->>DISP: success → clear current_task
+    DISP-->>DISP: todo_list empty → END
 
-        Executor --> ContextFlush
-
-        state ContextFlush {
-            [*] --> CheckResult
-            CheckResult --> ClearSlot : success=true
-            CheckResult --> CheckNeedsHilp : success=false
-            CheckNeedsHilp --> SetHalt : needs_hilp=true\nhalt_reason=TASK_FAILURE
-            CheckNeedsHilp --> SetHalt : needs_hilp=false\n(conservative fallthrough)
-            ClearSlot --> [*]
-            SetHalt --> [*]
-        }
-    }
-
-    ContextFlush --> Dispatcher : todo_list not empty and halt=false
-    ContextFlush --> Done : todo_list empty and halt=false
-    ContextFlush --> HumanIntervention : halt_flag=true
-
-    state HumanIntervention {
-        [*] --> WaitOperator
-        WaitOperator --> RetryAction : action=retry\n(valid only for TASK_FAILURE)
-        WaitOperator --> CompleteAction : action=complete\n(valid only for MANUAL_TASK)
-        WaitOperator --> AbortAction : action=abort
-        RetryAction --> [*] : clear halt, keep current_task
-        CompleteAction --> [*] : clear halt, clear current_task
-        AbortAction --> [*] : clear current_task + todo_list
-    }
-
-    HumanIntervention --> Executor : retry → retry same task
-    HumanIntervention --> Dispatcher : complete → continue queue
-    HumanIntervention --> Done : abort
-    Done --> [*]
+    rect rgb(254, 243, 199)
+        Note over EXE,RDK: Failure branch (e.g. IK_FAILURE)
+        PaP-->>EXE: SkillResult(success=False, error_type="IK_FAILURE",\nsuggestion="Try approaching from above")
+        Note over EXE: LLM recovery loop
+        EXE->>EXE: create_agent → analyze error
+        EXE->>EXE: escalate_to_hitl("IK_FAILURE", suggestion=...)
+        EXE-->>Op: ⏸ HITL Handler — retry / next_task / replan / abort
+        Op->>EXE: "retry"
+        EXE->>PaP: try_execute(...) — retry same task
+    end
 ```
 
 ---
 
-## 3. GlobalState 数据流
+## GlobalState Field Map
 
-> [2026-03-13 更新] 新增 `halt_reason`、`_hi_action`；完善各节点写入路径
+Which node reads / writes each field.
 
 ```mermaid
 flowchart LR
     subgraph STATE["GlobalState (LangGraph shared state)"]
         direction TB
-        MSG["messages: list[BaseMessage]<br/>message bus (operator.add)"]
-        TODO["todo_list: list[dict]<br/>supports mixed auto/manual"]
-        CUR["current_task: dict<br/>execution slot: {} = idle"]
-        LAST["last_result: Optional[dict]<br/>includes needs_hilp field"]
-        HALT["halt_flag: bool<br/>HILP trigger"]
-        HREASON["halt_reason: Optional[str]<br/>TASK_FAILURE / MANUAL_TASK"]
-        LOG["execution_log: list[str]<br/>audit trail (operator.add)"]
-        RS["robot_state: RobotState<br/>pose/joint snapshot"]
+        MSG["messages\nAnnotated append-only"]
+        TODO["todo_list"]
+        CUR["current_task\nexecution slot: {} = idle"]
+        LAST["last_result: SkillResult"]
+        HALT["halt_flag: bool"]
+        HR["halt_reason"]
+        LOG["execution_log\nAnnotated append-only"]
     end
 
-    PLAN_NODE["Planner"] -->|"write"| TODO
-    DISP_NODE["Dispatcher"] -->|"pop(0) fill"| CUR
-    DISP_NODE -->|"update"| TODO
-    DISP_NODE -->|"manual task: set True"| HALT
-    DISP_NODE -->|"manual task: write"| HREASON
-    EXEC_NODE["Executor"] -->|"write (includes needs_hilp)"| LAST
-    EXEC_NODE -->|"write"| LOG
-    CF_NODE["Context Flush"] -->|"success: clear"| CUR
-    CF_NODE -->|"success: clear"| LAST
-    CF_NODE -->|"success: clear"| HREASON
-    CF_NODE -->|"failure needs_hilp=T: set True"| HALT
-    CF_NODE -->|"failure: write TASK_FAILURE"| HREASON
-    CF_NODE -->|"write"| LOG
-    HI_NODE["Human Intervention"] -->|"all actions: clear"| HALT
-    HI_NODE -->|"all actions: clear"| HREASON
-    HI_NODE -->|"complete/abort: clear"| CUR
-    HI_NODE -->|"abort: clear"| TODO
-```
+    SUP["Supervisor"] -->|write AIMessage| MSG
+    PLAN["Planner"] -->|write| TODO
+    PLAN -->|write| LOG
 
----
+    DISP["Dispatcher"] -->|pop → write| CUR
+    DISP -->|update| TODO
+    DISP -->|manual: set True| HALT
+    DISP -->|manual: MANUAL_TASK| HR
+    DISP -->|write| LOG
 
-## 4. SkiLib 组件架构
+    EXE["Executor"] -->|write| LAST
+    EXE -->|success: clear {}| CUR
+    EXE -->|failure: set True| HALT
+    EXE -->|failure: TASK_FAILURE| HR
+    EXE -->|write| LOG
 
-```mermaid
-graph TB
-    subgraph AGENT["Agent Layer (LangGraph)"]
-        SUP2["Supervisor"]
-        EXEC2["Executor"]
-    end
-
-    subgraph REGISTRY["SkillRegistry (singleton)"]
-        DEC["@skill decorator<br/>auto-register on import"]
-        SCHEMA["get_llm_tool_schemas()<br/>Anthropic format"]
-        LIST["list_skills(category)<br/>queried by Supervisor"]
-    end
-
-    subgraph SKILLS2["Skills (platform-agnostic)"]
-        PAP["PickAndPlace"]
-        TS["TaskSkills<br/>list_targets / get_target_info<br/>query_assembly_spec<br/>request_human_intervention"]
-    end
-
-    subgraph PRIMS2["Primitives (RoboDK-related)"]
-        MJ["MoveJ<br/>joint motion"]
-        ML["MoveL<br/>linear motion"]
-        GR["Grasp / Release<br/>gripper"]
-        SQ["SceneQuery<br/>ListItems / GetTargetPose<br/>GetApproachTarget / CheckReachable"]
-    end
-
-    subgraph CONTEXT["RobotContext (singleton)"]
-        RDK2["RoboDK connection<br/>RDK + robot object"]
-        STATE2["get_current_state()<br/>→ RobotState snapshot"]
-    end
-
-    subgraph SPECS["Process specs"]
-        YAML["specs/*.yaml<br/>Part IDs / target positions / process constraints"]
-    end
-
-    SUP2 -->|"tool call"| SCHEMA
-    EXEC2 -->|"dynamic load"| REGISTRY
-    REGISTRY --> SKILLS2
-    SKILLS2 --> PRIMS2
-    PRIMS2 --> CONTEXT
-    TS --> YAML
-    REGISTRY -->|"set_robot_context()"| CONTEXT
-
-    style AGENT fill:#dbeafe,stroke:#3b82f6
-    style REGISTRY fill:#fef3c7,stroke:#f59e0b
-    style SKILLS2 fill:#d1fae5,stroke:#10b981
-    style PRIMS2 fill:#fce7f3,stroke:#ec4899
-    style CONTEXT fill:#ede9fe,stroke:#8b5cf6
-    style SPECS fill:#f3f4f6,stroke:#9ca3af
-```
-
----
-
-## 5. 执行槽（current_task）生命周期
-
-> [2026-03-13 更新] 新增 ManualPending 状态和 complete 转换
-
-```mermaid
-stateDiagram-v2
-    [*] --> Empty : initialized
-
-    Empty : current_task = {}
-    AutoOccupied : current_task = {type=auto, skill, params}
-    ManualPending : current_task = {type=manual, description}\nhalt_flag=T, halt_reason=MANUAL_TASK
-    Failed : current_task retained (unchanged)\nhalt_flag=T, halt_reason=TASK_FAILURE
-
-    Empty --> AutoOccupied : Dispatcher.pop(0) type=auto
-    Empty --> ManualPending : Dispatcher.pop(0) type=manual
-    AutoOccupied --> Empty : Context Flush (success=True)
-    AutoOccupied --> Failed : Context Flush (needs_hilp=True)
-    Failed --> AutoOccupied : Human Intervention action=retry\n(clear halt, keep slot)
-    Failed --> Empty : Human Intervention action=abort
-    ManualPending --> Empty : Human Intervention action=complete\n(clear halt, clear slot)
-    ManualPending --> Empty : Human Intervention action=abort
-
-    note right of Empty : Dispatcher fills a new task only when slot is {}
-    note right of Failed : Dispatcher skips non-empty slot and does not overwrite
-    note right of ManualPending : Executor is bypassed; wait directly for operator
-```
-
----
-
-## 6. Agent 高层控制流（概览）
-
-> 展示从自然语言指令到任务完成的完整主路径，以及 HILP 挂起与恢复的关键分支。
-> 省略节点内部细节（ReAct 循环、retry 逻辑等），聚焦于**节点间的路由决策**。
-
-```mermaid
-flowchart TD
-    START(["🟢 Natural language instruction<br/>e.g. 'Place Part_A into Tray_1'"])
-
-    subgraph L1["Layer 1 · Planning"]
-        SUP["🧠 Supervisor<br/><i>ReAct loop · knowledge saturation</i>"]
-        PLAN["📋 Planner<br/><i>structured output · generate todo_list</i>"]
-        SUP -->|"knowledge saturated"| PLAN
-    end
-
-    subgraph L2["Layer 2 · Execution loop"]
-        DISP["⚙️ Dispatcher<br/><i>pop(0) when slot is empty</i>"]
-        EXEC["🤖 Executor<br/><i>load Skill · execute · write last_result</i>"]
-        CF["🧹 Context Flush<br/><i>pure code · inspect last_result</i>"]
-
-        DISP -->|"type=auto"| EXEC
-        EXEC --> CF
-    end
-
-    subgraph HILP["Human Intervention Layer"]
-        HI["👤 Human Intervention<br/><i>interrupt() · await operator action</i>"]
-    end
-
-    DONE(["🏁 Done"])
-
-    %% ── happy path ──
-    START --> SUP
-    PLAN -->|"todo_list"| DISP
-
-    %% ── Dispatcher branches ──
-    DISP -->|"type=manual<br/>halt_reason=MANUAL_TASK"| HI
-    DISP -->|"queue empty · slot empty"| DONE
-
-    %% ── Context Flush branches ──
-    CF -->|"✅ success<br/>clear slot"| DISP
-    CF -->|"📭 queue empty · no halt"| DONE
-    CF -->|"❌ needs_hilp=True<br/>halt_reason=TASK_FAILURE"| HI
-
-    %% ── HumanIntervention exits ──
-    HI -->|"retry<br/>keep current_task"| EXEC
-    HI -->|"complete<br/>clear current_task"| DISP
-    HI -->|"abort<br/>clear queue"| DONE
-
-    %% ── Supervisor HILP ──
-    SUP -.->|"request_human_intervention"| HI
-
-    %% ── 样式 ──
-    style L1   fill:#dbeafe,stroke:#3b82f6
-    style L2   fill:#d1fae5,stroke:#10b981
-    style HILP fill:#fef3c7,stroke:#f59e0b
-    style START fill:#f0fdf4,stroke:#16a34a
-    style DONE  fill:#f0fdf4,stroke:#16a34a
-    style HI    fill:#fef9c3,stroke:#ca8a04
-```
-
----
-
-## 7. @require_robot_active 守卫机制
-
-```mermaid
-flowchart TD
-    CALL["R-skill call<br/>e.g. move_to_target()"]
-    CHECK{{"halt_flag == True ?"}}
-    BYPASS{{"bypass_halt == True ?"}}
-    BLOCK["Return SkillResult\nsuccess=False\nerror_type=ROBOT_INACTIVE"]
-    EXEC3["Execute skill normally"]
-
-    CALL --> CHECK
-    CHECK -->|"No"| EXEC3
-    CHECK -->|"Yes"| BYPASS
-    BYPASS -->|"No (regular R-skill)"| BLOCK
-    BYPASS -->|"Yes (whitelist)"| EXEC3
-
-    subgraph WHITELIST["Whitelist (bypass_halt=True)"]
-        R["resume()"]
-        RHI["request_human_intervention()"]
-    end
-
-    EXEC3 -.-> WHITELIST
+    HH["HITL Handler\nManual Handler"] -->|clear False| HALT
+    HH -->|clear None| HR
+    HH -->|"complete/abort: clear {}"| CUR
+    HH -->|abort: clear| TODO
+    HH -->|write| LOG
+    HH -->|replan: write HumanMessage| MSG
 ```
