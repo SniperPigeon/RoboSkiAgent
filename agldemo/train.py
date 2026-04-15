@@ -14,17 +14,17 @@ def make_initial_prompt() -> agl.PromptTemplate:
 
 
 def main():
-    # Critic: Gemini via OpenAI-compatible endpoint，无需任何中间件
+    # Critic: Claude via OpenAI-compatible endpoint，无需任何中间件
     # API key 从 https://aistudio.google.com 获取
     critic_client = AsyncOpenAI(
-        api_key=os.environ["GEMINI_API_KEY"],
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key=os.environ["ANTHROPIC_API_KEY"],
+        base_url="https://api.anthropic.com/v1/",
     )
 
     algo = agl.APO(
         critic_client,
-        gradient_model="gemini-2.5-flash",   # critique 生成
-        apply_edit_model="gemini-2.5-flash",  # prompt 编辑
+        gradient_model="claude-sonnet-4-6",   # critique 生成
+        apply_edit_model="claude-sonnet-4-6",  # prompt 编辑
         val_batch_size=4,
         gradient_batch_size=2,
         beam_width=2,

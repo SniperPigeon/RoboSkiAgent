@@ -421,19 +421,26 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     sensor_by_name          = {t.name: t for t in sensor_tools}
 
     # ---- Phase 1: generate execution plan via tool calls (LLM) ----------------
+    # We call the LLM once and execute its tool_calls sequentially ourselves
+    # instead of delegating to create_agent's ToolNode, which runs all calls in
+    # a single AIMessage in parallel and causes non-deterministic step ordering.
     logger.info("[executor_v2] Generating plan for %s(%s)", skill_name, params)
     plan_tools, steps = _make_plan_tools(primitive_tools, sensor_tools)
-    system_prompt     = _build_planning_prompt(skill_name, spec.body, params)
-    plan_agent        = create_agent(model=llm, tools=plan_tools, system_prompt=system_prompt)
+    plan_tools_by_name = {t.name: t for t in plan_tools}
+    system_prompt      = _build_planning_prompt(skill_name, spec.body, params)
 
-    plan_agent.invoke({
-        "messages": [HumanMessage(
-            content=(
-                f"Build the execution plan for the {skill_name} skill now. "
-                "Register every step and check in order using the provided tools."
-            )
-        )]
-    })
+    plan_llm = llm.bind_tools(plan_tools)
+    ai_msg   = plan_llm.invoke([
+        HumanMessage(content=system_prompt),
+        HumanMessage(content=(
+            f"Build the execution plan for the {skill_name} skill now. "
+            "Register every step and check in order using the provided tools."
+        )),
+    ])
+    for tc in getattr(ai_msg, "tool_calls", []):
+        tool = plan_tools_by_name.get(tc["name"])
+        if tool is not None:
+            tool.invoke(tc["args"])
 
     if not steps:
         logger.error("[executor_v2] Plan agent produced no steps for %s", skill_name)
