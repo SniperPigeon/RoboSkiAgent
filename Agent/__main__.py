@@ -31,7 +31,8 @@ def main():
     # Initialize RobotContext (required before build_graph)
     from SkiLib.robotcontext import RobotContext
     context = RobotContext()
-    if args.skip_check:
+    skip_check_env = os.getenv("ROBOSKI_SKIP_CHECK", "false").lower() in ("1", "true", "yes")
+    if args.skip_check or skip_check_env:
         context.debug_skip_check = True
 
     from Agent.graph import build_graph, make_initial_state

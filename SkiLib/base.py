@@ -138,9 +138,13 @@ class SkillResult:
             "message": self.message,
         }
         if self.robot_state is not None:
+            pose = self.robot_state.pose
+            # robomath.Mat is not JSON-serializable; convert to nested list.
+            if hasattr(pose, "tolist"):
+                pose = pose.tolist()
             payload["robot_state"] = {
                 "joints":        self.robot_state.joints,
-                "pose":          self.robot_state.pose,
+                "pose":          pose,
                 "gripper_state": self.robot_state.gripper_state,
             }
         if not self.success:

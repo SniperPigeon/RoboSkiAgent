@@ -130,7 +130,7 @@ def _check_for_interrupt(graph, config: dict, session: dict, log_lines: list[str
 def launch_gui(
     graph=None,
     log_queue: _queue_module.Queue | None = None,
-    debug_skip_check: bool = True,
+    debug_skip_check: bool | None = None,
     **kwargs,
 ):
     """Build and launch the Gradio demo.
@@ -142,6 +142,9 @@ def launch_gui(
         **kwargs:         Forwarded to demo.launch().
     """
     _setup_env()
+
+    if debug_skip_check is None:
+        debug_skip_check = os.getenv("ROBOSKI_SKIP_CHECK", "true").lower() in ("1", "true", "yes")
 
     if log_queue is None:
         log_queue = _queue_module.Queue()
