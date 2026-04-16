@@ -134,7 +134,9 @@ def _get_graph() -> Any:
     load_dotenv(override=True)  # re-read .env each call so provider changes take effect
     global _graph, _graph_provider
     provider = os.getenv("ROBOSKI_LLM_PROVIDER", "claude")
-    if _graph is not None:
+    if _graph is not None and provider == _graph_provider:
+        return _graph  # reuse cached graph if provider unchanged
+    if _graph is not None and provider != _graph_provider:
         logger.info("[planning_agent] LLM provider changed (%s → %s), rebuilding graph", _graph_provider, provider)
     setup_robot_env()
     _graph = build_planning_graph()
@@ -263,8 +265,8 @@ def critic_score(plan_input: str, expected: list[dict], actual: list[dict]) -> f
         score = float(data["score"])
         logger.debug("[critic] score=%.2f  reason=%s", score, data.get("reason", ""))
         return max(0.0, min(1.0, score))
-    except Exception as e:
-        logger.error("[critic] failed: %s", e)
+    except Exception:
+        logger.error("[critic] failed — falling back to 0.0", exc_info=True)
         return 0.0
 
 
