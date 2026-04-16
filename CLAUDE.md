@@ -161,15 +161,14 @@ flowchart TD
 - ❌ 禁止调用任何底层硬件 API
 - ✅ 世界里只有符号和 ID（如 `Target_A`、`Tool_Gripper`）
 
-> [2026-03-26 实现] `graph_test.ipynb` 中已用 `create_agent` + `SupervisorOutput` 结构化 schema 实现真实 LLM 调用。工具集来自 `SkiLib/metatools/informative.py`（T-skills）。可用技能列表由代码注入 system prompt，LLM 不填写。
+> [2026-04-16 当前实现] `Agent/nodes/supervisor.py`：`create_agent` + `SupervisorOutput` 结构化输出（Pydantic）。工具集来自 `SkiLib/metatools/informative.py`（T-skills）。可用技能列表由 `_get_available_skills()` 代码注入 system prompt，LLM 不填写。supervisor 输出以 `AIMessage` 写入 `messages`，供 planner 直接读取。
 
 **Planner**
 - ~~使用强制结构化输出生成 `todo_list` JSON 任务队列~~ ← 原设计
-- ✅ **实际采用**（2026-03-26）：工具调用方式 — 为每个已注册 Skill 动态生成 `add_<SkillName>_task` 工具（复用 `try_execute` 的 args_schema），LLM 通过逐一调用工具构建计划，无需直接输出 JSON
-- 优势：LLM 只需会用工具，不需要记住 JSON schema；参数校验由 Pydantic args_schema 自动完成
-- 生成后必须抹除调研阶段的对话记录，防止污染下层（⚠️ 消息清理尚未实现）
+- ✅ **实际采用**（`Agent/nodes/planner.py`）：工具调用方式 — 为每个已注册 Skill 动态生成 `add_<SkillName>_task` 工具（复用 `try_execute` 的 args_schema），另有 `add_manual_task` 工具；LLM 通过逐一调用工具构建计划，无需直接输出 JSON
+- planner 读取 `state["messages"][-1].content`（supervisor AIMessage），包装为 `HumanMessage` 传入局部 agent，**不写入全局 messages**，只更新 `todo_list`
+- ⚠️ supervisor 调研阶段的对话记录（messages 历史）在 planner 调用时仍然存在；planner 局部 agent 使用单独的消息列表，与全局 messages 隔离，因此不污染下层
 - ❌ 禁止输出模糊描述，参数必须合法
-- ~~system prompt 要求 LLM 在每个 plan 前插入一个 manual task 让操作员审批计划~~ ← 已废弃（2026-03-27）：prompt 层约束对弱模型不可靠，且操作员无法通过 manual task 纠正计划内容；审批职责移交给结构性节点 `plan_review`，`manual` 任务语义还原为"机器人做不了的人工步骤"（如手动拧紧螺栓）
 
 ### Layer 2 · 执行与清理层
 
@@ -183,14 +182,12 @@ flowchart TD
 - ✅ **结构保证**：审批由节点强制触发，与 LLM 能力无关；弱模型不会跳过审批
 - ✅ **可纠错**：`replan` 路径让操作员把修改意见送回 supervisor，比 abort + 重启更高效
 
-> [2026-03-27 实现] `graph_test.ipynb` 中已实现：
-> - interrupt 展示完整 `todo_list` 摘要（task_id / type / skill 或 description）
+> [2026-04-16 当前实现] `Agent/nodes/plan_review.py`：
+> - `interrupt({"options": [...], "description": plan_summary})` 展示 `todo_list` 摘要
 > - `isinstance(result, dict)` 解包：approve/abort 传纯字符串，replan 传 `{"action": "replan", "feedback": "..."}`
-> - replan 路径：写入 `HumanMessage` + 清空 `todo_list`，回 supervisor 重规划
-> - abort 路径：清空 `todo_list`，路由到 END
-> - `plan_review_action` 字段已加入 `GlobalState`
-> - ⚠️ Planner system prompt 仍残留"在计划前插入 manual task"规则，会导致 approve 后弹出多余的 complete/abort，待删除该条规则
-> GUI（2026-03-27）：`feedback_box` 改为常驻显示（避免 Gradio streaming 与 visible 更新的时序冲突）；`handle_choice` 当 `choice == "replan"` 时将文本打包为 `{"action": "replan", "feedback": <text>}` 传给 `Command(resume=...)`；`_check_for_interrupt` 修复 `IndexError`（API 异常时 `state.next` 非空但 `interrupts` 为空 tuple）。
+> - replan 路径：写入 `HumanMessage(content=f"Please replan based on human feedback: {feedback}")` 到 messages，清空 `todo_list`，`plan_review_action="replan"` → `plan_review_router` → supervisor
+> - abort 路径：写入 `plan_review_action="abort"` → `plan_review_router` → END（不清空 todo_list，图直接结束）
+> - approve 路径：写入 `plan_review_action="approve"` → `plan_review_router` → dispatcher
 
 **Dispatcher**（纯代码，非 LLM）
 - ~~`todo_list.pop(0)` 提取 `current_task` 写入 Global State~~ ← 已废弃：无条件 pop 导致任务在 halt/失败时永久丢失
@@ -204,34 +201,29 @@ flowchart TD
 > [2026-03-25 更新] `human_intervention` 已拆分为两个节点，manual 路径目标节点改为 `manual_task_handler`：
 - ✅ **manual 任务**：填入后由 `after_dispatcher` 路由到 `manual_task_handler`（不再是 `human_intervention`）
 
-> [2026-03-26 更新] `graph_test.ipynb` 框架重构，Dispatcher 路由条件函数改名为 `task_router`（返回 `"auto"` / `"manual"` / `"END"`）；节点命名调整：
-- `manual_task_handler` → `manual_intervention_handler`
-- `task_failure_handler` → `hitl_handler`（新增 `replan` 路径，可回到 Supervisor 重规划）
+> [2026-04-16 当前实现] `Agent/nodes/dispatcher.py`：
+- `dispatcher` 函数：slot 有任务时直接返回 `{}`（不覆盖）；slot 空时 `pop(0)` 填入，manual 任务同时设 `halt_flag=True` + `halt_reason="MANUAL_TASK"`
+- `task_router` 函数：`current_task` 为空 → `"END"`；否则返回 `current_task["type"]`（`"auto"` / `"manual"`）
 
 **Executor**
-- 只关注当前 `current_task`，动态加载 P/R/E-skills 完成单步物理动作
-- ✅ 执行结果写入 `last_result`（数据用途），Context Flush 据此决定成功/失败路径
+- 只关注当前 `current_task`，调用 `SkillRegistry` 完成单步物理动作
+- ✅ 执行结果写入 `last_result`，出边函数 `post_task_router` 据此路由
 - ❌ 禁止解析 YAML 规范
 - ❌ 禁止思考业务逻辑（"为什么要抓这个零件"）
 
-> [2026-03-26 更新] `graph_test.ipynb` Executor 节点完整实现：
-- 直接调用 `skill_registry[skill_name].try_execute(**params)` 执行任务
-- 失败时启动 LLM 恢复循环（ReAct 内循环，尝试自愈；循环内 `needs_hilp=False`）
-- 放弃时抛出 `_EscalateHITLException(error_type, reason, suggestion)`，携带结构化失败诊断
-- 所有路径均将 `SkillResult` 对象写入 `last_result`（类型已由 `Optional[dict]` 升为 `Optional[SkillResult]`）
+> [2026-04-16 当前实现] `Agent/nodes/executor.py`：
+- `halt_flag=True` 时提前返回（写入 `last_result` 为 HALTED 错误，由 `post_task_router` 路由到 `hitl_handler`）
+- 直接调用 `skill.try_execute(**task["params"])` 执行任务
+- 首次成功：清空 `current_task = {}`，写入 `last_result(success=True)`，路由 → `dispatcher`
+- 首次失败：启动 LLM 恢复循环（`create_agent` + `escalate_tool` + skill tools + `list_targets`）
+  - LLM 完成恢复（未调用 escalate）：清空 `current_task = {}`，写入 `last_result(success=True, message="Recovered")`，路由 → `dispatcher`
+  - LLM 调用 `escalate_to_hitl`：抛出 `_EscalateHITLException`，设 `halt_flag=True` + `halt_reason="TASK_FAILURE"`，写入 `last_result(success=False, needs_hitl=True)`，路由 → `hitl_handler`
+- `post_task_router` 读取 `last_result.success` 决定出边（`"dispatcher"` / `"hitl_handler"` / `"END"`）
+- ⚠️ 消息清理（`RemoveMessage` 抹除 ToolMessage 噪音）**尚未实现**
 
-**Context Flush**（纯代码）
-- ✅ **成功时**：清空 `current_task = {}`（腾出槽位），清空 `last_result = None`
-- ✅ **失败时**：设置 `halt_flag = True`；`current_task` 与 `todo_list` 保持不变，resume 后直接重试同一任务
-- 用 `RemoveMessage` 抹除 Executor 产生的 `ToolMessage` 噪音
-- ❌ 绝不删除上层下发的 `current_task` 相关消息
-
-> [2026-03-13 更新] 失败路径细化：
-- ✅ **失败且 `last_result.needs_hilp=True`**：设 `halt_flag=True`，设 `halt_reason="TASK_FAILURE"`；`current_task/todo_list` 保持不变
-- ✅ **失败且 `last_result.needs_hilp=False`**：理论上不应出现（Executor 未放弃时不应退出节点）；若出现，保守 fallthrough 至 halt，不允许静默跳过失败任务
-- ✅ **成功时**：额外清空 `halt_reason=None`
-
-> [2026-03-26 更新] `graph_test.ipynb` 中 Context Flush **不作为独立节点**，其路由逻辑合并为 `executor` 的条件出边函数 `post_task_router`（返回 `"dispatcher"` / `"hitl_handler"` / `"END"`）。消息清理（`RemoveMessage`）尚未实现，待 Phase 4 补充。
+~~**Context Flush**（纯代码）~~
+~~已废弃为独立节点。其功能完全合并进 `executor` 节点本身和出边函数 `post_task_router`：~~
+~~成功时 executor 自己清空 `current_task = {}`；失败时 executor 设 `halt_flag=True` + `halt_reason`；路由由 `post_task_router` 读 `last_result.success` 完成。~~
 
 ~~**HumanIntervention**（LangGraph interrupt，新增节点）~~
 ~~- 接收两类入口：~~
@@ -244,84 +236,90 @@ flowchart TD
 
 > [2026-03-25 更新] 单节点设计有缺陷：两种入口的合法 actions 不同，靠运行时 guard 防御非法组合（`retry` on `MANUAL_TASK`）是设计异味。拆分为两个独立节点，非法组合从结构上消失。
 
-**ManualTaskHandler**（LangGraph interrupt，计划内人工步骤）
-- 唯一入口：`after_dispatcher` 路由 `type="manual"` 任务
+**ManualInterventionHandler**（LangGraph interrupt，计划内人工步骤）
+- 唯一入口：`task_router` 路由 `type="manual"` 任务（`Agent/nodes/manual_handler.py`）
 - 操作员 actions：`complete` / `abort`（不提供 `retry`，结构上排除非法组合）
-- `complete`：清除 `halt_flag/halt_reason`，清空 `current_task` → Dispatcher 推进到下一任务
-- `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
+- `complete`：清除 `halt_flag/halt_reason`，清空 `current_task = {}`，写 `intervention_action="complete"` → `manual_intervention_router` → `dispatcher`
+- `abort`：清除 `halt_flag/halt_reason`，清空 `current_task = {}` + `todo_list = []`，写 `intervention_action="abort"` → `manual_intervention_router` → END
 
-> [2026-03-26 修正] `graph_test.ipynb` 实现细节修正：
-- `current_task` 清空值修正为 `{}` （原误写为 `None`，与执行槽语义不符）
-- `halt_flag=False` / `halt_reason=None` 两处字段清零均已补齐
-
-**TaskFailureHandler**（LangGraph interrupt，执行故障恢复）
-- 唯一入口：`context_flush` 失败路径（`needs_hilp=True`）
-- 操作员 actions：`retry` / `abort`（不提供 `complete`，语义上不合理）
-- `retry`：清除 `halt_flag/halt_reason`，保留 `current_task` → Executor 重试同一任务
-- `abort`：清除 `halt_flag/halt_reason`，清空 `current_task + todo_list` → END
-
-> [2026-03-26 修正] `graph_test.ipynb` hitl_handler 实现细节修正：
-- 节点入口打印 `last_result` 诊断信息（`error_type`、`suggestion`）
-- **所有路径**（`retry` / `next_task` / `replan` / `abort`）均显式清 `halt_flag=False`；原部分路径遗漏
-- `next_task` / `abort` 路径中 `current_task` 清空值修正为 `{}` （原误写为 `None`）
-- `replan` 路径同样清 `halt_flag/halt_reason`，清空 `current_task`，回到 `supervisor`
+**HITLHandler**（LangGraph interrupt，执行故障恢复）
+- 唯一入口：`post_task_router` 失败路径（`Agent/nodes/hitl_handler.py`）
+- interrupt 展示 `last_result.error_type` / `message` / `suggestion`
+- 操作员 actions：`retry` / `next_task` / `replan` / `abort`
+  - `retry`：清 `halt_flag/halt_reason`，保留 `current_task` → `hitl_router` → `executor`（重试同一任务）
+  - `next_task`：清 `halt_flag/halt_reason`，清空 `current_task = {}` → `hitl_router` → `dispatcher`
+  - `replan`：清 `halt_flag/halt_reason`，清空 `current_task = {}` + `todo_list = []`，写入 `HumanMessage` 触发 supervisor 重规划 → `hitl_router` → `supervisor`
+  - `abort`：清 `halt_flag/halt_reason`，清空 `current_task = {}` + `todo_list = []` → `hitl_router` → END
+- 所有路径均写入 `hitl_command` 供 `hitl_router` 读取
 
 ---
 
 ## Global State 结构
 
+> [2026-04-16 当前实现] `Agent/state.py`
+
 ```python
 class GlobalState(TypedDict):
-    todo_list: list[dict]        # Planner 生成的任务队列；Dispatcher 成功后消费头部
-    current_task: dict           # 执行槽：{} = 空闲，{...} = 执行中或失败保留
-    robot_state: RobotState      # 当前机器人位姿、关节角、夹爪状态
-    halt_flag: bool              # True = 系统已挂起，等待人工介入
-    last_result: Optional[SkillResult]  # Executor 写入的结果数据（非路由信号）；原 Optional[dict]，2026-03-26 升为 SkillResult
-    execution_log: list[str]     # 极简状态上报，由 Context Flush 写入
-    messages: list[BaseMessage]  # LangGraph 消息列表
+    # Layer-1: planning context
+    todo_list: list[dict]           # [{task_id, type, skill/description, params}, ...]
+    # Layer-2: execution slot
+    current_task: dict              # {} = idle, {...} = executing or failed-preserved
+    # Robot state snapshot
+    robot_state: dict
+    # Control flags
+    halt_flag: bool                 # True = all R-skill execution locked
+    halt_reason: Optional[str]      # "TASK_FAILURE" | "MANUAL_TASK" | None (diagnostic)
+    # Written by Executor; drives post_task_router
+    last_result: Optional[SkillResult]
+    # plan_review_router signal
+    plan_review_action: Optional[Literal["approve", "replan", "abort"]]
+    # manual_intervention_router signal (written by manual_intervention_handler)
+    intervention_action: Optional[str]   # "complete" | "abort"
+    # hitl_router signal (written by hitl_handler)
+    hitl_command: Optional[str]          # "retry" | "next_task" | "replan" | "abort"
+    # Execution log: append-only (Annotated list[str]), written by every node
+    execution_log: Annotated[list[str], operator.add]
+    # LangGraph message list: append-only (Annotated)
+    messages: Annotated[list[BaseMessage], operator.add]
 ```
 
-> [2026-03-26 设计决策] **messages / execution_log 职责分离**（Gradio 接入 + HITL interrupt 前置条件）
-> - **`execution_log`**：唯一展示渠道。所有节点（supervisor / planner / executor / hitl_handler / manual_intervention_handler）均写入，格式统一 `"[节点名] 内容"`；不参与 LLM 推理，Gradio 订阅此字段。
-> - **`messages`**：职责收窄为 LLM 推理链。supervisor 读取上下文；各节点禁止向此字段追加状态摘要 AIMessage（否则 LLM 每轮都会看到越来越多的执行噪音）。
-> - **例外**：hitl_handler `replan` 路径写入 `HumanMessage` 触发 supervisor 重规划——这是 LLM 推理输入，不是展示日志，保留此行为。
-> - **待实现**：`graph_test.ipynb` 中 executor/planner 双写 messages 的冗余 AIMessage 待删除（见 Checklist 3.5.7）。
+**messages / execution_log 职责分离**（2026-04-16 实际行为）
 
-> [2026-03-13 更新] 新增两个字段：
-```python
-class GlobalState(TypedDict):
-    # ... 原有字段不变 ...
-    halt_reason: Optional[str]   # "TASK_FAILURE" | "MANUAL_TASK" | None；诊断用，节点拆分后不再作路由信号
-    _hi_action:  Optional[str]   # 内部路由字段：manual_task_handler / task_failure_handler 写入，
-                                 #   after_manual_task / after_task_failure 读取，不对外暴露
-```
+| 字段 | 写入节点 | 用途 |
+|------|----------|------|
+| `execution_log` | 全部节点 | 唯一展示渠道；格式 `"[节点名] 内容"`；不参与 LLM 推理，Gradio 订阅此字段 |
+| `messages` | supervisor / executor / plan_review(replan) / hitl_handler(replan) | LLM 推理链 + 节点间数据传递 |
 
-> [2026-03-26 更新] `graph_test.ipynb` 框架重构，`_hi_action` 被两个独立字段替代：
-```python
-class GlobalState(TypedDict):
-    # ... 原有字段不变（含 halt_reason）...
-    intervention_action: Optional[str]  # manual_intervention_handler 写入："complete" | "abort"
-                                        # manual_intervention_router 读取；不跨节点使用
-    hitl_command: Optional[str]         # hitl_handler 写入："retry" | "next_task" | "replan" | "abort"
-                                        # hitl_router 读取；不跨节点使用
-```
-> `replan` 是新增路径：hitl_handler 可发 `"replan"` → 路由回 `supervisor` 重新规划整个序列（原 CLAUDE.md 未包含此选项）
+**messages 各节点写入行为（实际代码）**：
+- **supervisor**：写入 `AIMessage(content=str(SupervisorOutput + available_skills))`，供 planner 读取
+- **planner**：读取 `state["messages"][-1].content`（supervisor 输出），**不写入 messages**，只更新 `todo_list`
+- **executor**：写入 `AIMessage`（执行结果摘要，历史记录用）；非路由信号
+- **plan_review**：仅 `replan` 路径写入 `HumanMessage`（含 feedback）触发 supervisor 重规划
+- **hitl_handler**：仅 `replan` 路径写入 `HumanMessage` 触发 supervisor 重规划
+- **dispatcher / manual_intervention_handler**：不操作 messages
 
-**todo_list 任务格式（新增 `type` 字段）：**
+> ⚠️ executor 向 messages 写入 AIMessage 属于执行历史记录，会随轮次积累。如果后续 supervisor 重规划时这些历史消息干扰 LLM，需要在 replan 路径中清理执行阶段的 AIMessage。
+
+**todo_list 任务格式：**
 ```python
 # 自动任务（由 Executor 执行）
 {"task_id": "t1", "type": "auto",   "skill": "PickAndPlace", "params": {...}}
 
-# 人工任务（Dispatcher 直接路由到 human_intervention，不经过 Executor）
+# 人工任务（task_router 路由到 manual_intervention_handler，不经过 Executor）
 {"task_id": "t2", "type": "manual", "description": "手动拧紧 M10 螺栓至 25 N·m"}
 ```
-Planner 可在同一 `todo_list` 中混排，Dispatcher 按 `type` 字段自动路由，完全确定性。
+Planner 可在同一 `todo_list` 中混排，Dispatcher 按 `current_task.type` 字段自动路由，完全确定性。
 
 **`current_task` 作为执行槽的状态语义（单一真相来源）：**
 - `{}` → 槽空闲，Dispatcher 负责填入下一个任务
 - `{...}` → 任务在执行中，或失败后保留等待 resume 重试；Dispatcher 看到非空槽不会覆盖
 
-**路由信号来源**：`halt_flag`（而非 `last_result`）— Context Flush 失败时设置 `halt_flag=True`，`should_continue` 只需检查 `halt_flag` 和 `todo_list`，无隐式字段耦合。
+**路由信号来源**：出边函数读取专用字段，无隐式耦合：
+- `executor` 出边：`post_task_router` 读 `last_result.success`（不是 `halt_flag`）
+- `dispatcher` 出边：`task_router` 读 `current_task["type"]`
+- `plan_review` 出边：`plan_review_router` 读 `plan_review_action`
+- `manual_intervention_handler` 出边：`manual_intervention_router` 读 `intervention_action`
+- `hitl_handler` 出边：`hitl_router` 读 `hitl_command`
 
 ---
 
