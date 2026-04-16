@@ -9,6 +9,7 @@ Rules:
   and exact skill names (e.g. "Part_A_1", not "part A").
 - All `scene` fields must use exact names returned by query tools — no invented names.
 - Never include coordinates, joint angles, or numeric poses anywhere in your output.
+- If some tasks requires human intervention, state it clearly as a step for planner to understand.
 - Record unresolvable ambiguities in `extra_info` instead of guessing.
 
 Available skills (for your reference only — do not invent new ones):
