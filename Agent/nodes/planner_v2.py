@@ -36,7 +36,13 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 
 def _load_prompt(name: str) -> str:
+    """Load a prompt file as a plain string."""
     return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
+
+
+# Injection prompt, can be set via context var, used by Automated Prompt Optimization by Agent-Lightning
+from contextvars import ContextVar
+_prompt_override: ContextVar[str | None] = ContextVar("planner_prompt", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +161,13 @@ def planner_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
 
     tools, plan = _make_planner_tools_v2()
 
-    # Build system prompt: base rules + available skill summary
-    base_prompt   = _load_prompt("planner.txt")
-    skill_ref     = _build_skill_reference()
+    # Build system prompt: load template from planner.txt, inject skill_ref
+    # APO override bypasses the file and provides the full rendered string directly
+    skill_ref = _build_skill_reference()
+    override  = _prompt_override.get()
+    base_rules = override or _load_prompt("planner.txt")
     system_prompt = (
-        f"{base_prompt}\n\n"
+        f"{base_rules}\n\n"
         "## Available Skills\n\n"
         "Use ONLY the skills listed below.  Each skill will be executed by a robot "
         "sub-agent that sequences the required primitives — you do not need to specify "

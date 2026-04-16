@@ -8,11 +8,22 @@ Rules:
   - All return values use RoboDK symbolic names (strings) only.
 """
 
+import os
 from typing import cast
 from langchain_core.tools import tool
 from robodk import robolink
 
 from SkiLib.robotcontext import RobotContext
+
+
+def _excluded_objects() -> frozenset[str]:
+    """Names to hide from list_objects(), read from ROBOSKI_EXCLUDED_OBJECTS env var.
+
+    Set a comma-separated list in .env:
+        ROBOSKI_EXCLUDED_OBJECTS=Base Cylinder,Some Other Background Object
+    """
+    raw = os.getenv("ROBOSKI_EXCLUDED_OBJECTS", "")
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
 
 
 def _ctx() -> RobotContext:
@@ -31,9 +42,23 @@ def list_targets() -> list[str]:
 
 @tool
 def list_objects() -> list[str]:
-    """List all object (workpiece) names in the RoboDK scene.
+    """List workpiece names available for manipulation in the RoboDK scene.
+    Returns only top-level objects — sub-components of fixtures or tables are excluded.
     Use this to discover which parts are present and available for manipulation."""
-    return cast(list[str], _ctx().RDK.ItemList(filter=robolink.ITEM_TYPE_OBJECT, list_names=True))
+    ctx = _ctx()
+    items = ctx.RDK.ItemList(filter=robolink.ITEM_TYPE_OBJECT)
+    # Keep only objects whose immediate parent is NOT another object.
+    # Sub-components of tables/fixtures are children of an ITEM_TYPE_OBJECT parent;
+    # standalone workpieces are children of the station root or a reference frame.
+    excluded = _excluded_objects()
+    result = []
+    for item in items:
+        if item.Name() in excluded:
+            continue
+        parent = item.Parent()
+        if not parent.Valid() or parent.Type() != robolink.ITEM_TYPE_OBJECT:
+            result.append(item.Name())
+    return result
 
 
 @tool
