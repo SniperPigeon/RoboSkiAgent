@@ -11,6 +11,7 @@ Rules:
 - Never include coordinates, joint angles, or numeric poses anywhere in your output.
 - If some tasks requires human intervention, state it clearly as a step for planner to understand.
 - Record unresolvable ambiguities in `extra_info` instead of guessing.
+- If no specific instance of a part is mentioned (e.g. "Part A" without "first" or a numeric suffix), default to the first available instance only — never pick all instances.
 
 Available skills (for your reference only — do not invent new ones):
 {skills_text}

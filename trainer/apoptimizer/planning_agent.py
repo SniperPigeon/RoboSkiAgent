@@ -283,14 +283,23 @@ def planner_rollout(task: PlannerTask, prompt_template: agl.PromptTemplate) -> f
     3. Score todo_list against task["expected"] via Claude Sonnet critic
     4. Return reward in [0.0, 1.0]
     """
-    planner_prompt = prompt_template.format(**task)
-    todo_list      = planner_agent(task["plan_input"], planner_prompt)
-    reward         = critic_score(task["plan_input"], task["expected"], todo_list)
+    try:
+        planner_prompt = prompt_template.format(**task)
+    except KeyError as e:
+        logger.warning("[rollout] prompt template has unresolvable variable %s — penalising with reward=0.0", e)
+        return 0.0
+    todo_list = planner_agent(task["plan_input"], planner_prompt)
+    reward = critic_score(task["plan_input"], task["expected"], todo_list)
 
     logger.info(
         "[rollout] task=%s  plan=%d tasks  reward=%.2f",
         task["task_id"], len(todo_list), reward,
     )
+    # Emit reward into the OTel tracer so agentlightning's runner log can display
+    # "Final reward: X" correctly.  The runner (Case 1) captures trace_spans
+    # *before* adding its own reward span to the store, so without this call
+    # find_final_reward(trace_spans) always returns None.
+    agl.emit_reward(reward)
     return reward
 
 
@@ -386,12 +395,80 @@ def collect_dataset(
 
 if __name__ == "__main__":
     # Example usage: collect dataset from hardcoded instructions list
+    #
+    # Assembly protocol
+    # -----------------
+    # The workpiece assembly ALWAYS follows the ABC rotation constraint:
+    #   Step 1 (auto)  : Place Part A at target
+    #   Step 2 (auto)  : Place Part B on top of Part A
+    #   Step 3 (manual): Human flips the sub-assembly (MANDATORY between B and C)
+    #   Step 4 (auto)  : Place Part C onto the flipped sub-assembly
+    #
+    # Additional manual steps (safety checks, fastening, quality inspection) may
+    # appear at other points in the sequence, but the B→flip→C ordering is fixed.
+    # Partial tasks (A only, A+B only) are also valid and require no flip.
+    #
+    # The instructions below are designed to:
+    #   1. Cover all valid partial and full ABC sequences.
+    #   2. Insert extra manual gates at different positions to stress-test whether
+    #      the weak planner model places them correctly without duplicating the
+    #      mandatory flip or reordering the ABC steps.
+    #   3. Provide two full-cycle repetitions to test multi-step planning.
 
     instructions = [
-        "把第一个Part A放到目标位置。",
-        "把第一个Part A放到目标位置，然后把Part B放上去。",
-        "把第一个Part A放到目标位置，然后把Part B放到它上面，即目标位置。",
-        "把第一个Part A放到目标，然后等人类确认后，把Part B放到它上面。",
-        "把Part A放到目标位置，把Part B放到它上面，等待人类操作员帮你上螺丝并翻转工件后，你把Part C放上去。",
+        # ── Group 0: originals (kept for backwards compatibility) ──────────────
+        "Place the first Part A at the target position.",
+        "Place the first Part A at the target position, then place Part B on top.",
+        "Place the first Part A at the target position, then place Part B on top of it at the target.",
+        "Place the first Part A at the target, wait for human confirmation, then place Part B on top.",
+        "Place Part A at the target, place Part B on top, then wait for the human operator to fasten screws and flip the workpiece, then place Part C.",
+
+        # ── Group 1: full ABC, auto + mandatory flip, different phrasings ──────
+        # Tests: can the model always insert exactly one manual flip between B and C?
+        "Place the first Part A and the first Part B in sequence, wait for the operator to flip the workpiece, then place the first Part C to complete the assembly.",
+        "Install the first Part A at the target, stack the first Part B on top, then after the manual flip place the first Part C.",
+        "Complete a three-piece stacked assembly: place the first Part A, place the first Part B, manual workpiece flip, then place the first Part C.",
+
+        # ── Group 2: full ABC + one extra manual step at different positions ───
+        # Tests: correct placement of an additional manual gate without disrupting
+        # the mandatory flip or the ABC order.
+
+        # 2a. Safety check BEFORE any auto task
+        "Before assembly, have the operator confirm safety conditions, then place the first Part A, place the first Part B, manual flip, finally place the first Part C.",
+
+        # 2b. Alignment check AFTER A, before B
+        "After placing the first Part A, pause for the operator to check alignment accuracy, then place the first Part B, flip the workpiece, then place the first Part C.",
+
+        # 2c. Fastening BETWEEN A and B
+        "Place the first Part A at the target, then after the operator tightens the locating pins place the first Part B, flip the workpiece, finally place the first Part C.",
+
+        # 2d. Quality inspection AFTER C
+        "Place the first Part A and the first Part B in sequence, after the manual workpiece flip place the first Part C, then wait for the operator to perform a final quality inspection.",
+
+        # ── Group 3: full ABC + multiple extra manual steps ────────────────────
+        # Tests: several manual gates without the model collapsing them or
+        # confusing them with the mandatory flip.
+
+        # 3a. Check after A, mandatory flip between B and C, final check after C
+        "After placing the first Part A the operator inspects it, then place the first Part B, manual flip, place the first Part C, then perform a final quality inspection.",
+
+        # 3b. Fastening after A, mandatory flip, final inspection after C
+        "Place the first Part A, operator installs screws, place the first Part B, manual workpiece flip, place the first Part C, operator confirms product quality.",
+
+        # ── Group 4: two full ABC cycles (stress test) ─────────────────────────
+        # Each cycle contains the mandatory flip; between cycles a reset is needed.
+        # Tests: six-step auto plan with two manual flips inserted correctly.
+
+        # 4a. Two cycles back-to-back
+        (
+            "Complete two assembly cycles: Cycle 1 — place Part A, place Part B, manual flip, place Part C;"
+            " after the operator resets the station, Cycle 2 — place Part A, place Part B, manual flip, place Part C."
+        ),
+
+        # 4b. Two cycles, each with a post-cycle quality check
+        (
+            "Cycle 1: place Part A, place Part B, manual flip, place Part C, operator QC inspection;"
+            " Cycle 2: repeat the same steps — place Part A, place Part B, manual flip, place Part C, operator QC inspection."
+        ),
     ]
     collect_dataset(instructions, output_path="collected_dataset.jsonl")

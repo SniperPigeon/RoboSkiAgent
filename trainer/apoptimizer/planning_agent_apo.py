@@ -83,10 +83,11 @@ def setup_apo_logger(file_path: str = "apo.log") -> None:
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
 
-    apo_logger = logging.getLogger("agentlightning")
-    apo_logger.setLevel(logging.INFO)
-    apo_logger.addHandler(console_handler)
-    apo_logger.addHandler(file_handler)
+    for name in ("agentlightning", "planning_agent"):
+        lg = logging.getLogger(name)
+        lg.setLevel(logging.INFO)
+        lg.addHandler(console_handler)
+        lg.addHandler(file_handler)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -110,18 +111,28 @@ def main():
     from agentlightning.adapter.messages import TraceToMessages
     load_dotenv()
     setup_apo_logger()
-    train, val = split_dataset(load_dataset())
+    all_samples = load_dataset()
+    # Manually pin complex tasks to val so the seed-prompt baseline is not
+    # inflated by easy single-step samples.  Val covers every complexity tier:
+    #   collect_0004 (4 tasks, A+B+flip+C)
+    #   collect_0009 (5 tasks, A+manual+B+flip+C)
+    #   collect_0012 (6 tasks, A+manual+B+flip+C+manual)
+    #   collect_0014 (9 tasks, two full cycles)
+    VAL_IDS = {"collect_0004", "collect_0009", "collect_0012", "collect_0014"}
+    val   = [s for s in all_samples if s["task_id"] in VAL_IDS]
+    train = [s for s in all_samples if s["task_id"] not in VAL_IDS]
     print(f"Dataset: {len(train)} train / {len(val)} val")
 
     # APO uses OpenAI to generate prompt gradients and edits (reads OPENAI_API_KEY from env).
     openai_client = AsyncOpenAI()
+    #TODO 只是优化planner prompt无法保证如果supervisor的总结出错或不准确，APO无法优化，应该让APO也能优化supervisor的总结提示词，或者至少让APO看到supervisor的总结结果以便优化planner prompt时能考虑到总结的质量
 
     apo = agl.APO(
         async_openai_client=openai_client,
-        gradient_model="gpt-4.1-mini",
-        apply_edit_model="gpt-4.1-mini",
+        gradient_model="gpt-5-mini",
+        apply_edit_model="gpt-5-mini",
         beam_width=2,
-        branch_factor=2,
+        branch_factor=4,
         beam_rounds=3,
     )
 
@@ -129,7 +140,7 @@ def main():
         algorithm=apo,
         initial_resources={"planner_prompt": make_initial_prompt()},
         adapter=TraceToMessages(),
-        n_runners=2,
+        n_runners=1,  # set to 1 for large local models to avoid concurrent VRAM pressure
     )
 
     try:
