@@ -32,15 +32,15 @@ parameters:
   transit_motion:
     type: str
     required: false
-    default: "MoveJ"
+    default: "MoveL"
     enum: ["MoveJ", "MoveL"]
-    description: "Motion primitive for the pick→place transit (pick_approach to place_approach). MoveJ is safer for long-range moves."
+    description: "Motion primitive for the pick→place transit (pick_approach to place_approach). MoveL is safer for long-range moves."
   initial_motion:
     type: str
     required: false
-    default: "MoveJ"
+    default: "MoveL"
     enum: ["MoveJ", "MoveL"]
-    description: "Motion primitive for the initial move to home_position. MoveJ is recommended."
+    description: "Motion primitive for the initial move to home_position. MoveL is recommended."
 
 required_primitives: [MoveJ, MoveL, Grasp, Release]
 ---
