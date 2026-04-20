@@ -13,6 +13,7 @@ from typing import Literal
 
 from langchain_core.language_models import BaseChatModel
 
+from SkiLib.RDK_Test import reset_station
 from SkiLib.log import get_logger
 from tests.benchmark.outcome_evaluator import evaluate_outcome
 from tests.benchmark.plan_evaluator import generate_and_score, score_from_jsonl
@@ -79,6 +80,7 @@ def _run_full_graph(llm: BaseChatModel, task: TaskConfig) -> dict:
     from Agent.nodes.supervisor import reset_supervisor_cache
     from langgraph.errors import GraphInterrupt
 
+    reset_station()
     graph = build_graph_v2(llm=llm)
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}

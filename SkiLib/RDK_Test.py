@@ -6,7 +6,10 @@
 
 # You can also use the new version of the API:
 from robodk import robolink    # RoboDK API
-from robodk import robomath    # Robot toolbox
+from robodk import robomath
+
+from SkiLib.robotcontext import RobotContext
+from SkiLib.sensors.gripper import _query_attachment    # Robot toolbox
 RDK = robolink.Robolink()
 
 # Forward and backwards compatible use of the RoboDK API:
@@ -14,7 +17,8 @@ RDK = robolink.Robolink()
 from robodk import *      # RoboDK API
 from robolink import *    # Robot toolbox
 # Link to RoboDK
-
+from SkiLib.log import get_logger
+logger = get_logger(__name__) 
 
 def get_Robot_Type():
     # Retrieve the robot item. Passing an empty string and the item type 
@@ -310,34 +314,46 @@ def test_moveL():
         print("✓ 路径验证通过")
     else:
         print("✗ 路径验证失败")
+        
+
+def reset_station():
+    '''
+    这个函数可以用来重置RoboDK场景到初始状态，适用于测试前的准备工作。
+    你需要在RoboDK中创建一个程序（例如“Reset Station”），包含所有必要的步骤来重置场景。
+    '''
+    RDK.RunProgram("Reset Parts", wait_for_finished=True)
+    logger.info("Station reset completed.")
+    print("Station reset completed.")
 
 if __name__=="__main__":
     robot = RDK.Item('', ITEM_TYPE_ROBOT)
+    ctx = RobotContext()
     get_Robot_Type()
     get_Tool_Name()
     
     frame_partA = RDK.Item(str("Part_A_1 Frame"), robolink.ITEM_TYPE_FRAME)
     start_partA = RDK.Item("Home A", robolink.ITEM_TYPE_TARGET)
     target_partA = RDK.Item("App Pick Part A", robolink.ITEM_TYPE_TARGET)
+    print(_query_attachment("Gripper Extension"))
     
-    robot.setSpeed(speed_linear=-1, speed_joints=4)
-    RDK.setCollisionActive(False) # Bypass collision testing
-    # Remember to properly setup collision pairs.
-    print(robot.MoveJ_Test(robot.Joints(), target_partA.Joints()))
-    robot.MoveL(target_partA)
-    print(robot.Joints())
-    #     robot.MoveJ(start_partA)
-    print(target_partA.Joints())
+    # robot.setSpeed(speed_linear=-1, speed_joints=4)
+    # RDK.setCollisionActive(False) # Bypass collision testing
+    # # Remember to properly setup collision pairs.
+    # print(robot.MoveJ_Test(robot.Joints(), target_partA.Joints()))
+    # robot.MoveL(target_partA)
+    # print(robot.Joints())
+    # #     robot.MoveJ(start_partA)
+    # print(target_partA.Joints())
     
-    robot.MoveL()
+    # robot.MoveL()
     
-    #prefixed sequence run from local sub-routine programs on RoboDK 
-    # run_Predefined_Programs('Reset Parts',False)
-    # run_Predefined_Programs('Pick&Place Part A',True)
-    # run_Predefined_Programs('Pick&Place Part B',True)
-    # run_Predefined_Programs('Rotate Combined Part',True)
-    # run_Predefined_Programs('Pick&Place Part C',True)
-    # run_Predefined_Programs('Reset Parts',False)
+    # #prefixed sequence run from local sub-routine programs on RoboDK 
+    # # run_Predefined_Programs('Reset Parts',False)
+    # # run_Predefined_Programs('Pick&Place Part A',True)
+    # # run_Predefined_Programs('Pick&Place Part B',True)
+    # # run_Predefined_Programs('Rotate Combined Part',True)
+    # # run_Predefined_Programs('Pick&Place Part C',True)
+    # # run_Predefined_Programs('Reset Parts',False)
     
 
 

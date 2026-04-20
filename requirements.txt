@@ -4,7 +4,7 @@ torch
 torchvision
 GPUtil
 langchain 
-langchain-huggingface 
+langchain-huggingface
 transformers 
 accelerate 
 bitsandbytes
@@ -20,3 +20,5 @@ robodk
 langgraph
 langgraph-cli[inmem]
 langgraph-sdk
+langchain-community
+llama-cpp-python

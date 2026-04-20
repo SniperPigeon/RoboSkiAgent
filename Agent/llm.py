@@ -16,6 +16,7 @@ def create_llm(provider: str = None, **kwargs) -> BaseChatModel: #typ: ignore
 
     elif provider == "ollama":
         from langchain_ollama import ChatOllama
+        load_dotenv()  # ensure env vars are reloaded
         model_id = os.getenv("OLLAMA_MODEL_ID", "qwen3:latest")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         return ChatOllama(model=model_id, base_url=base_url, temperature=0, **kwargs)
