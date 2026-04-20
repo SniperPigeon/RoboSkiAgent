@@ -464,6 +464,8 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     # ---- Phase 2: execute plan step by step (Python) --------------------------
     success, failed_step, failure_info = _run_plan(steps, primitive_tools_by_name, sensor_by_name)
 
+    _planned_steps = [s.model_dump() for s in steps]
+
     if success:
         logger.info("[executor_v2] %s (%s) -> SUCCESS (code path)", tid, skill_name)
         return {
@@ -475,6 +477,8 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
                 message=f"{skill_name} completed by plan executor.",
             ),
             "current_task": {},
+            "planned_steps": _planned_steps,
+            "recovered":     False,
         }
 
     # ---- Phase 3: recovery (LLM sub-agent, on demand) -------------------------
@@ -499,6 +503,8 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
             ),
             "halt_flag":   True,
             "halt_reason": "TASK_FAILURE",
+            "planned_steps": _planned_steps,
+            "recovered":     False,
         }
 
     recovery_prompt = _build_recovery_prompt(
@@ -535,6 +541,8 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
             ),
             "halt_flag":   True,
             "halt_reason": "TASK_FAILURE",
+            "planned_steps": _planned_steps,
+            "recovered":     True,
         }
 
     logger.info("[executor_v2] %s (%s) -> RECOVERED by LLM", tid, skill_name)
@@ -547,6 +555,8 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
             message=f"{skill_name} recovered by LLM after step {failed_step.step_id} failure.",  # type: ignore[union-attr]
         ),
         "current_task": {},
+        "planned_steps": _planned_steps,
+        "recovered":     True,
     }
 
 
