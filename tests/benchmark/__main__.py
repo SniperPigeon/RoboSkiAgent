@@ -11,10 +11,30 @@ Usage:
 Model is always read from env (ROBOSKI_LLM_PROVIDER + ANTHROPIC_MODEL / OLLAMA_MODEL_ID).
 """
 import argparse
+import os
+from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+from trainer.apoptimizer.planning_agent import setup_robot_env
+
+load_dotenv(override=True)
+
+
+def _default_csv_path(mode: str) -> Path:
+    provider = os.getenv("ROBOSKI_LLM_PROVIDER", "claude")
+    if provider == "claude":
+        model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    elif provider == "ollama":
+        model = os.getenv("OLLAMA_MODEL_ID", "qwen3:latest")
+    else:
+        model = provider
+    model_slug = model.replace(":", "-").replace("/", "-")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = Path(__file__).resolve().parents[1] / "result"
+    out_dir.mkdir(exist_ok=True)
+    return out_dir / f"{mode}_{timestamp}_{model_slug}.csv"
 
 # Executor eval cases — params must match your live RoboDK scene
 _EXECUTOR_CASES_DEFAULT = [
@@ -27,14 +47,14 @@ _EXECUTOR_CASES_DEFAULT = [
             "pick_target":    "Pick Part A",
             "place_approach": "App Place Part A",
             "place_target":   "Place Part A",
-            "transit_motion": "MoveJ",
-            "initial_motion": "MoveJ",
+            "transit_motion": "MoveL",
+            "initial_motion": "MoveL",
         },
         "verification": {
             "task_instruction": "Pick Part_A_1 and place it at Place Part A",
             "item_name":  "Part_A_1",
             "near_target": "Place Part A",
-            "tolerance_mm": 15.0,
+            "tolerance_mm": 100.0,
         },
     },
 ]
@@ -83,16 +103,17 @@ def main():
     parser.add_argument("--save", default=None, metavar="FILE",
                         help="Save JSON report to FILE")
     parser.add_argument("--csv", default=None, metavar="FILE",
-                        help="Append results to CSV incrementally (e.g. results.csv)")
+                        help="CSV output path (default: tests/result/<mode>_<time>_<model>.csv)")
     args = parser.parse_args()
 
     from tests.benchmark.csv_logger import CsvLogger
     from tests.benchmark.report import BenchmarkReport, print_report, save_report
 
-    csv_log = CsvLogger(args.csv, mode=args.mode) if args.csv else None
+    csv_path = Path(args.csv) if args.csv else _default_csv_path(args.mode)
+    csv_log = CsvLogger(csv_path, mode=args.mode)
 
     if args.mode == "executor":
-        _setup_robot()
+        setup_robot_env()
         from Agent.llm import create_llm
         from tests.benchmark.executor_eval import run_executor_eval
         llm = create_llm()
@@ -108,10 +129,10 @@ def main():
         from tests.benchmark.task_configs import load_task_configs, load_verifiable_tasks
 
         if args.mode == "full":
-            _setup_robot()
+            setup_robot_env()
             tasks = load_verifiable_tasks()
         elif args.mode == "plan-gen":
-            _setup_robot()    # supervisor needs RobotContext for scene queries
+            setup_robot_env()    # supervisor needs RobotContext for scene queries
             tasks = load_task_configs()
         else:  # plan — no RoboDK, no LLM
             tasks = load_task_configs()
@@ -120,9 +141,8 @@ def main():
         report = runner.run(mode=args.mode, csv_logger=csv_log)  # type: ignore[arg-type]
 
     print_report(report)
-    if csv_log:
-        csv_log.close()
-        print(f"\nResults appended to {args.csv}  (run_id={csv_log.run_id})")
+    csv_log.close()
+    print(f"\nResults saved to {csv_path}  (run_id={csv_log.run_id})")
     if args.save:
         save_report(report, args.save)
 

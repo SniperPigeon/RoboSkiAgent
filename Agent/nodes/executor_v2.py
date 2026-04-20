@@ -207,16 +207,28 @@ def _make_plan_tools(
 # Planning prompt
 # ---------------------------------------------------------------------------
 
-def _build_planning_prompt(skill_name: str, skill_body: str, params: dict) -> str:
+def _build_planning_prompt(
+    skill_name: str, skill_body: str, params: dict,
+    scene_tools: list[str] | None = None,
+) -> str:
     base        = _load_prompt("execution_planner.txt")
     param_lines = "\n".join(f"- `{k}` = `{v}`" for k, v in params.items())
-    return (
+    prompt = (
         f"{base}\n\n"
         f"## Skill: {skill_name}\n\n"
         f"{skill_body}\n\n"
         "## Concrete Parameter Values\n\n"
         f"{param_lines}"
     )
+    if scene_tools:
+        tool_lines = "\n".join(f"- {t}" for t in scene_tools)
+        prompt += (
+            "\n\n## Available Gripper Tools in Scene\n\n"
+            "Use one of these exact names for `tool_name` parameters, "
+            "or leave `tool_name` empty to use the currently active tool:\n\n"
+            f"{tool_lines}"
+        )
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +439,9 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     logger.info("[executor_v2] Generating plan for %s(%s)", skill_name, params)
     plan_tools, steps = _make_plan_tools(primitive_tools, sensor_tools)
     plan_tools_by_name = {t.name: t for t in plan_tools}
-    system_prompt      = _build_planning_prompt(skill_name, spec.body, params)
+    from SkiLib.metatools.informative import list_tools
+    scene_tools   = list_tools.invoke({})
+    system_prompt = _build_planning_prompt(skill_name, spec.body, params, scene_tools=scene_tools)
 
     plan_llm = llm.bind_tools(plan_tools)
     ai_msg   = plan_llm.invoke([
