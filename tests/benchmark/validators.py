@@ -40,12 +40,12 @@ class ExpectedStep:
 
 
 EXPECTED_PICK_AND_PLACE: list[ExpectedStep] = [
-    ExpectedStep("MoveJ",   "home_position",  allow_substitutes={"MoveL"}),   # initial_motion
+    ExpectedStep("MoveL",   "home_position",  allow_substitutes={"MoveJ"}),   # initial_motion
     ExpectedStep("MoveL",   "pick_approach"),
     ExpectedStep("MoveL",   "pick_target"),
     ExpectedStep("Grasp",   "item",           arg_key="expected_item"),
     ExpectedStep("MoveL",   "pick_approach"),
-    ExpectedStep("MoveJ",   "place_approach", allow_substitutes={"MoveL"}),   # transit_motion
+    ExpectedStep("MoveL",   "place_approach", allow_substitutes={"MoveJ"}),   # transit_motion
     ExpectedStep("MoveL",   "place_target"),
     ExpectedStep("Release", "item",           arg_key="expected_item"),
     ExpectedStep("MoveL",   "place_approach"),

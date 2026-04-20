@@ -220,10 +220,19 @@ You will be given:
   - expected: the reference todo_list produced by an expert
   - actual:   the todo_list produced by the model under evaluation
 
-Score the actual plan on a scale from 0.0 to 1.0:
-  1.0 — identical or semantically equivalent (same skills, same symbol names, same order)
-  0.7 — correct skills and order, minor param differences (e.g. different approach height)
-  0.4 — partially correct (some tasks right, some missing or wrong)
+Evaluate in this order:
+  1. Count: does actual have the same number of tasks as expected?
+     A missing or extra task is a SIGNIFICANT error regardless of what else is correct.
+  2. Content: for each position, is the skill/type and key params correct?
+  3. Order: are the tasks in the right sequence?
+
+Scoring anchors:
+  1.0 — identical or semantically equivalent (same count, same skills, same params, same order)
+  0.8 — correct count and order, minor param differences only (e.g. slightly different wording
+        in a manual description, or a non-critical param value difference)
+  0.6 — one task missing OR one task extra OR one task in wrong position, rest correct
+  0.4 — two or more tasks missing/extra/wrong, but core structure partially preserved
+  0.2 — major structural errors: wrong skills, most tasks missing or in wrong order
   0.0 — completely wrong or empty
 
 Rules for manual tasks (type="manual"):
@@ -231,6 +240,7 @@ Rules for manual tasks (type="manual"):
     conveys the same operator action as the reference, even if phrased differently.
   - Only penalise a manual task if it is missing, misplaced in the sequence, or
     describes a fundamentally different action.
+  - A missing manual task counts the same as a missing auto task — it is a real omission.
 
 Respond with ONLY a JSON object: {"score": <float>, "reason": "<one sentence>"}
 """

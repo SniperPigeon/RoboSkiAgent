@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from langchain_core.language_models import BaseChatModel
 
 from Agent.nodes.executor_v2 import executor_v2
+from SkiLib.RDK_Test import reset_station
 from SkiLib.verifiers import TaskVerifier, VerificationConfig
 from tests.benchmark.validators import SequenceScore, score_sequence
 
@@ -64,6 +65,7 @@ def run_executor_eval(
         "RobotContext not initialized. "
         "Call RobotContext() and SkillMdLoader.instance() before running executor eval."
     )
+    reset_station()
 
     state = {
         "current_task": {
@@ -83,6 +85,8 @@ def run_executor_eval(
         "intervention_action": None,
         "hitl_command": None,
     }
+    
+    
 
     result_state: dict = executor_v2(state, llm=llm)
 
