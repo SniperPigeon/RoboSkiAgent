@@ -20,9 +20,8 @@ Node signature is identical to planner():
 
 from pathlib import Path
 
-from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -175,11 +174,21 @@ def planner_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
         f"{skill_ref}"
     )
 
-    agent = create_agent(model=llm, tools=tools, system_prompt=system_prompt)
+    # Call LLM once and execute tool_calls sequentially to preserve generation order.
+    # create_agent's ToolNode executes all calls in a single AIMessage in parallel,
+    # causing non-deterministic task ordering with models that batch tool calls.
+    tool_map = {t.name: t for t in tools}
+    llm_with_tools = llm.bind_tools(tools)
 
-    # Supervisor output is the last AIMessage; wrap as HumanMessage for Anthropic
     sup_content = state["messages"][-1].content
-    agent.invoke({"messages": [HumanMessage(content=sup_content)]})
+    ai_msg = llm_with_tools.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=sup_content),
+    ])
+    for tc in getattr(ai_msg, "tool_calls", []):
+        tool = tool_map.get(tc["name"])
+        if tool is not None:
+            tool.invoke(tc["args"])
 
     manual_count = sum(1 for t in plan if t["type"] == "manual")
     logger.info("[planner_v2] Done: %d tasks (%d manual)", len(plan), manual_count)
