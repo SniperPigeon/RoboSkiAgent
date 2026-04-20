@@ -226,6 +226,12 @@ Score the actual plan on a scale from 0.0 to 1.0:
   0.4 — partially correct (some tasks right, some missing or wrong)
   0.0 — completely wrong or empty
 
+Rules for manual tasks (type="manual"):
+  - Do NOT penalise wording differences. A manual task is correct if its description
+    conveys the same operator action as the reference, even if phrased differently.
+  - Only penalise a manual task if it is missing, misplaced in the sequence, or
+    describes a fundamentally different action.
+
 Respond with ONLY a JSON object: {"score": <float>, "reason": "<one sentence>"}
 """
 
