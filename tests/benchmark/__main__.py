@@ -136,7 +136,7 @@ def main():
             tasks = load_task_configs()
         else:  # plan — no RoboDK, no LLM
             tasks = load_task_configs()
-
+        # TODO @SniperPigeon Local model died in long plans, add timeout and error handling
         runner = BenchmarkRunner(tasks=tasks)
         report = runner.run(mode=args.mode, csv_logger=csv_log)  # type: ignore[arg-type]
 
