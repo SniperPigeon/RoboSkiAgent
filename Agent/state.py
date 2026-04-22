@@ -21,6 +21,9 @@ class GlobalState(TypedDict):
     # Written by Executor; needs_hitl field drives Context Flush routing
     last_result: Optional[SkillResult]
 
+    # Internal routing field for Supervisor: None = proceed to planner, "abort" = skip to END
+    supervisor_action: Optional[str]
+
     plan_review_action: Optional[Literal["approve", "replan", "abort"]]
 
     # Internal routing field for ManualInterventionHandler: "complete" | "abort"

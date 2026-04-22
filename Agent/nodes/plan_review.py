@@ -8,6 +8,7 @@ logger = get_logger(__name__)
 
 def plan_review(state: GlobalState) -> dict:
     logger.info("[plan_review] Reviewing plan...")
+
     plan_summary = "\n".join(
         f"  {t['task_id']} [{t['type']}] "
         + (t.get("skill", "") + str(t.get("params", {})) if t["type"] == "auto" else t.get("description", ""))

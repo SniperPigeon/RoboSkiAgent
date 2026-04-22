@@ -159,10 +159,6 @@ def planner_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     State reads : messages (uses last message as task description from supervisor)
     State writes : todo_list, execution_log
     """
-    if state.get("halt_flag"):
-        logger.warning("[planner_v2] halt_flag set (reason: %s) — skipping planner", state.get("halt_reason"))
-        return {"execution_log": [f"[planner_v2] skipped — {state.get('halt_reason')}"]}
-
     logger.info("[planner_v2] Building plan via tool calls...")
 
     tools, plan = _make_planner_tools_v2()

@@ -36,7 +36,8 @@ def _default_csv_path(mode: str) -> Path:
     out_dir.mkdir(exist_ok=True)
     return out_dir / f"{mode}_{timestamp}_{model_slug}.csv"
 
-# Executor eval cases — params must match your live RoboDK scene
+# Executor eval cases — params must match your live RoboDK scene.
+# Naming convention: targets follow "App Pick Part X" / "Pick Part X" / "Place Part X" pattern.
 _EXECUTOR_CASES_DEFAULT = [
     {
         "case_id": "pick_place_part_a",
@@ -52,21 +53,65 @@ _EXECUTOR_CASES_DEFAULT = [
         },
         "verification": {
             "task_instruction": "Pick Part_A_1 and place it at Place Part A",
-            "item_name":  "Part_A_1",
+            "item_name":   "Part_A_1",
             "near_target": "Place Part A",
+            "tolerance_mm": 100.0,
+        },
+    },
+    {
+        "case_id": "pick_place_part_b",
+        "task_params": {
+            "item":           "Part_B_1",
+            "home_position":  "Home B",
+            "pick_approach":  "App Pick Part B",
+            "pick_target":    "Pick Part B",
+            "place_approach": "App Place Part B",
+            "place_target":   "Place Part B",
+            "transit_motion": "MoveL",
+            "initial_motion": "MoveL",
+        },
+        "verification": {
+            "task_instruction": "Pick Part_B_1 and place it at Place Part B",
+            "item_name":   "Part_B_1",
+            "near_target": "Place Part B",
+            "tolerance_mm": 100.0,
+        },
+    },
+    {
+        "case_id": "pick_place_part_c",
+        "task_params": {
+            "item":           "Part_C_1",
+            "home_position":  "Home C",
+            "pick_approach":  "App Pick Part C",
+            "pick_target":    "Pick Part C",
+            "place_approach": "App Place Part C",
+            "place_target":   "Place Part C",
+            "transit_motion": "MoveL",
+            "initial_motion": "MoveL",
+        },
+        "verification": {
+            "task_instruction": "Pick Part_C_1 and place it at Place Part C",
+            "item_name":   "Part_C_1",
+            "near_target": "Place Part C",
             "tolerance_mm": 100.0,
         },
     },
 ]
 
 
-def _build_executor_cases():
+def _build_executor_cases(repeat: int = 1) -> list:
+    """
+    Build executor eval cases from _EXECUTOR_CASES_DEFAULT.
+    With repeat > 1, each base case is expanded into N copies with a
+    '_r<n>' suffix on case_id so CSV rows are uniquely identified.
+    """
     from SkiLib.verifiers.base import ItemExpectation, VerificationConfig
     from tests.benchmark.executor_eval import ExecutorEvalCase
-    cases = []
+
+    base_cases = []
     for c in _EXECUTOR_CASES_DEFAULT:
         v = c["verification"]
-        cases.append(ExecutorEvalCase(
+        base_cases.append(ExecutorEvalCase(
             case_id=c["case_id"],
             task_params=c["task_params"],
             verification=VerificationConfig(
@@ -78,7 +123,16 @@ def _build_executor_cases():
                 )],
             ),
         ))
-    return cases
+
+    if repeat == 1:
+        return base_cases
+
+    import dataclasses
+    expanded = []
+    for case in base_cases:
+        for run in range(1, repeat + 1):
+            expanded.append(dataclasses.replace(case, case_id=f"{case.case_id}_r{run}"))
+    return expanded
 
 
 def _setup_robot():
@@ -104,6 +158,11 @@ def main():
                         help="Save JSON report to FILE")
     parser.add_argument("--csv", default=None, metavar="FILE",
                         help="CSV output path (default: tests/result/<mode>_<time>_<model>.csv)")
+    parser.add_argument("--repeat", type=int, default=1, metavar="N",
+                        help="Run each executor case N times (default: 1). "
+                             "Applies to --mode executor only.")
+    parser.add_argument("--continue_on", type=int, default=0, metavar="N",
+                        help="For executor mode: skip first N cases (default: 0). Useful for resuming after a crash.")
     args = parser.parse_args()
 
     from tests.benchmark.csv_logger import CsvLogger
@@ -118,7 +177,9 @@ def main():
         from tests.benchmark.executor_eval import run_executor_eval
         llm = create_llm()
         report = BenchmarkReport()
-        for case in _build_executor_cases():
+        cases = _build_executor_cases(repeat=args.repeat)
+        for i, case in enumerate(cases, 1):
+            print(f"\n[{i}/{len(cases)}] Running {case.case_id} ...")
             result = run_executor_eval(llm, case)
             report.executor_results.append(result)
             if csv_log:
@@ -134,6 +195,7 @@ def main():
         elif args.mode == "plan-gen":
             setup_robot_env()    # supervisor needs RobotContext for scene queries
             tasks = load_task_configs()
+            tasks = tasks[args.continue_on:]  # for plan-gen mode, allow skipping cases to resume after crash
         else:  # plan — no RoboDK, no LLM
             tasks = load_task_configs()
         # TODO @SniperPigeon Local model died in long plans, add timeout and error handling

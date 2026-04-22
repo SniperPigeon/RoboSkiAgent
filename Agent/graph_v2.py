@@ -38,7 +38,7 @@ from Agent.nodes.dispatcher import dispatcher, task_router
 from Agent.nodes.hitl_handler import hitl_handler, hitl_router
 from Agent.nodes.manual_handler import manual_intervention_handler, manual_intervention_router
 from Agent.nodes.plan_review import plan_review, plan_review_router
-from Agent.nodes.supervisor import supervisor
+from Agent.nodes.supervisor import supervisor, supervisor_router
 
 # ---- V2 nodes (skill.md-based) -----------------------------------------------
 from Agent.nodes.planner_v2 import planner_v2
@@ -86,9 +86,12 @@ def build_graph_v2(
     builder.add_node("hitl_handler",                hitl_handler)
 
     # ---- Unconditional edges --------------------------------------------------
-    builder.add_edge(START,        "supervisor")
-    builder.add_edge("supervisor", "planner")
-    builder.add_edge("planner",    "plan_review")
+    builder.add_edge(START, "supervisor")
+    builder.add_conditional_edges("supervisor", supervisor_router, {
+        "planner": "planner",
+        "END":     END,
+    })
+    builder.add_edge("planner", "plan_review")
 
     # ---- Conditional edges ----------------------------------------------------
     builder.add_conditional_edges("plan_review", plan_review_router, {
@@ -137,6 +140,8 @@ def make_initial_state(prompt: str) -> dict:
         "halt_flag":           False,
         "halt_reason":         None,
         "last_result":         None,
+        "supervisor_action":   None,
+        "plan_review_action":  None,
         "intervention_action": None,
         "hitl_command":        None,
         "execution_log":       [],

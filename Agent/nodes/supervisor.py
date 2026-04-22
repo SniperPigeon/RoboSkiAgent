@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 
 from langchain.agents import create_agent
@@ -5,10 +7,11 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
+from Agent.llm import get_node_timeouts
+from Agent.state import GlobalState
 from SkiLib.log import get_logger
 from SkiLib.metatools.informative import get_tools as get_info_tools
 from SkiLib.registry import SkillRegistry
-from Agent.state import GlobalState
 
 logger = get_logger(__name__)
 
@@ -77,10 +80,29 @@ def reset_supervisor_cache() -> None:
     _agent_cache.clear()
 
 
+def supervisor_router(state: GlobalState) -> str:
+    """Route to END on timeout/abort, otherwise proceed to planner."""
+    return "END" if state.get("supervisor_action") == "abort" else "planner"
+
+
 # ---- Node function -------------------------------------------------------------
 def supervisor(state: GlobalState, *, llm: BaseChatModel) -> dict:
     logger.info("[supervisor] Starting knowledge saturation...")
-    result = _get_supervisor_agent(llm).invoke({"messages": state["messages"]})
+    timeout = get_node_timeouts()["supervisor"]
+    agent   = _get_supervisor_agent(llm)
+    pool    = ThreadPoolExecutor(max_workers=1)
+    future  = pool.submit(agent.invoke, {"messages": state["messages"]})
+    try:
+        result = future.result(timeout=timeout)
+    except FuturesTimeout:
+        pool.shutdown(wait=False)
+        logger.error("[supervisor] LLM timed out after %ss", timeout)
+        return {
+            "execution_log":    [f"[supervisor] TIMEOUT after {timeout}s — aborting run"],
+            "supervisor_action": "abort",
+        }
+    finally:
+        pool.shutdown(wait=False)
 
     summary: SupervisorOutput | None = result.get("structured_response")
     if summary is None:
