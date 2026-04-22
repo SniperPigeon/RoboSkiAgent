@@ -18,6 +18,8 @@ Node signature is identical to planner():
     planner_v2(state: GlobalState, *, llm: BaseChatModel) -> dict
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
@@ -25,6 +27,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from Agent.llm import get_node_timeouts
 from Agent.state import GlobalState
 from SkiLib.log import get_logger
 from SkiLib.skill_loader import SkillMdLoader
@@ -156,6 +159,10 @@ def planner_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     State reads : messages (uses last message as task description from supervisor)
     State writes : todo_list, execution_log
     """
+    if state.get("halt_flag"):
+        logger.warning("[planner_v2] halt_flag set (reason: %s) — skipping planner", state.get("halt_reason"))
+        return {"execution_log": [f"[planner_v2] skipped — {state.get('halt_reason')}"]}
+
     logger.info("[planner_v2] Building plan via tool calls...")
 
     tools, plan = _make_planner_tools_v2()
@@ -181,10 +188,23 @@ def planner_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     llm_with_tools = llm.bind_tools(tools)
 
     sup_content = state["messages"][-1].content
-    ai_msg = llm_with_tools.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=sup_content),
-    ])
+    messages    = [SystemMessage(content=system_prompt), HumanMessage(content=sup_content)]
+    timeout     = get_node_timeouts()["planner"]
+
+    pool   = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(llm_with_tools.invoke, messages)
+    try:
+        ai_msg = future.result(timeout=timeout)
+    except FuturesTimeout:
+        pool.shutdown(wait=False)
+        logger.error("[planner_v2] LLM timed out after %ss", timeout)
+        return {
+            "todo_list": [],
+            "execution_log": [f"[planner_v2] TIMEOUT after {timeout}s — plan aborted"],
+        }
+    finally:
+        pool.shutdown(wait=False)
+
     for tc in getattr(ai_msg, "tool_calls", []):
         tool = tool_map.get(tc["name"])
         if tool is not None:

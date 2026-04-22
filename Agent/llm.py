@@ -4,6 +4,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Timeout (seconds) per LLM phase, keyed by provider.
+# ollama runs locally and is significantly slower than remote API calls.
+_TIMEOUTS: dict[str, dict[str, float]] = {
+    "claude": {"supervisor": 60,  "planner": 40, "executor_plan": 40, "executor_recovery": 60},
+    "ollama": {"supervisor": 180, "planner": 100, "executor_plan": 60, "executor_recovery": 80},
+}
+
+
+def get_node_timeouts() -> dict[str, float]:
+    """Return timeout seconds per node/phase for the active LLM provider."""
+    provider = os.getenv("ROBOSKI_LLM_PROVIDER", "claude")
+    return _TIMEOUTS.get(provider, _TIMEOUTS["claude"])
+
 
 def create_llm(provider: str = None, **kwargs) -> BaseChatModel: #typ: ignore
     """LLM factory. Provider is read from ROBOSKI_LLM_PROVIDER env var (default: claude)."""
@@ -11,8 +24,11 @@ def create_llm(provider: str = None, **kwargs) -> BaseChatModel: #typ: ignore
 
     if provider == "claude":
         from langchain_anthropic import ChatAnthropic
-        model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-        return ChatAnthropic(model=model, **kwargs)
+        model    = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+        # Set HTTP timeout = longest node timeout so the connection closes before
+        # the ThreadPoolExecutor wrapper fires, preventing zombie background threads.
+        timeout  = max(get_node_timeouts().values())
+        return ChatAnthropic(name=model, timeout=timeout, **kwargs)
 
     elif provider == "ollama":
         from langchain_ollama import ChatOllama

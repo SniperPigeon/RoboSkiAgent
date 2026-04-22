@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
@@ -7,9 +9,10 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from Agent.llm import get_node_timeouts
+from Agent.state import GlobalState
 from SkiLib.log import get_logger
 from SkiLib.registry import SkillRegistry
-from Agent.state import GlobalState
 
 logger = get_logger(__name__)
 
@@ -101,7 +104,20 @@ def planner(state: GlobalState, *, llm: BaseChatModel) -> dict:
 
     # Supervisor output is the last AIMessage; wrap as HumanMessage for Anthropic
     sup_content = state["messages"][-1].content
-    agent.invoke({"messages": [HumanMessage(content=sup_content)]})
+    timeout = get_node_timeouts()["planner"]
+    pool    = ThreadPoolExecutor(max_workers=1)
+    future  = pool.submit(agent.invoke, {"messages": [HumanMessage(content=sup_content)]})
+    try:
+        future.result(timeout=timeout)
+    except FuturesTimeout:
+        pool.shutdown(wait=False)
+        logger.error("[planner] LLM timed out after %ss", timeout)
+        return {
+            "todo_list": [],
+            "execution_log": [f"[planner] TIMEOUT after {timeout}s — plan aborted"],
+        }
+    finally:
+        pool.shutdown(wait=False)
 
     manual_count = sum(1 for t in plan if t["type"] == "manual")
     logger.info("[planner] Done: %d tasks (%d manual)", len(plan), manual_count)

@@ -22,6 +22,8 @@ Design
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -31,6 +33,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field, create_model
 
+from Agent.llm import get_node_timeouts
 from Agent.nodes.executor import _EscalateHITLException, escalate_tool  # noqa: F401
 from Agent.state import GlobalState
 from SkiLib.base import ERROR_ROBOT_INACTIVE, ExecutionPhase, SkillResult
@@ -443,14 +446,38 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     scene_tools   = list_tools.invoke({})
     system_prompt = _build_planning_prompt(skill_name, spec.body, params, scene_tools=scene_tools)
 
-    plan_llm = llm.bind_tools(plan_tools)
-    ai_msg   = plan_llm.invoke([
+    timeouts  = get_node_timeouts()
+    plan_llm  = llm.bind_tools(plan_tools)
+    messages  = [
         HumanMessage(content=system_prompt),
         HumanMessage(content=(
             f"Build the execution plan for the {skill_name} skill now. "
             "Register every step and check in order using the provided tools."
         )),
-    ])
+    ]
+    pool_plan = ThreadPoolExecutor(max_workers=1)
+    future    = pool_plan.submit(plan_llm.invoke, messages)
+    try:
+        ai_msg = future.result(timeout=timeouts["executor_plan"])
+    except FuturesTimeout:
+        pool_plan.shutdown(wait=False)
+        logger.error("[executor_v2] Plan LLM timed out after %ss for %s", timeouts["executor_plan"], tid)
+        return {
+            "execution_log": [f"[executor_v2] {tid} PLAN TIMEOUT after {timeouts['executor_plan']}s"],
+            "last_result": SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type="PLAN_TIMEOUT",
+                message=f"Plan generation timed out after {timeouts['executor_plan']}s.",
+                suggestion="Retry the task or reduce its complexity.",
+                needs_hitl=True,
+            ),
+            "halt_flag":   True,
+            "halt_reason": "TASK_FAILURE",
+        }
+    finally:
+        pool_plan.shutdown(wait=False)
+
     for tc in getattr(ai_msg, "tool_calls", []):
         tool = plan_tools_by_name.get(tc["name"])
         if tool is not None:
@@ -497,7 +524,7 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
 
     # ---- Phase 3: recovery (LLM sub-agent, on demand) -------------------------
     logger.warning("[executor_v2] %s failed at step %d (%s) — starting LLM recovery",
-                   tid, failed_step.step_id, failed_step.description)  # type: ignore[union-attr]
+                    tid, failed_step.step_id, failed_step.description)  # type: ignore[union-attr]
 
     if failed_step.on_fail == "escalate_hitl":  # type: ignore[union-attr]
         err_type = (failure_info.error_type if isinstance(failure_info, SkillResult)
@@ -527,18 +554,45 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     )
     sub_agent_tools = [escalate_tool, *primitive_tools, *sensor_tools]
     sub_agent       = create_agent(model=llm, tools=sub_agent_tools, system_prompt=recovery_prompt)
+    recovery_input  = {
+        "messages": [HumanMessage(
+            content=(
+                f"Step {failed_step.step_id} failed during {skill_name} execution. "  # type: ignore[union-attr]
+                "Assess current robot state and recover following your system prompt."
+            )
+        )]
+    }
 
+    pool_rec = ThreadPoolExecutor(max_workers=1)
+    future   = pool_rec.submit(lambda: sub_agent.invoke(recovery_input))  # type: ignore[arg-type]
     try:
-        sub_agent.invoke({
-            "messages": [HumanMessage(
-                content=(
-                    f"Step {failed_step.step_id} failed during {skill_name} execution. "  # type: ignore[union-attr]
-                    "Assess current robot state and recover following your system prompt."
-                )
-            )]
-        })
-
+        try:
+            future.result(timeout=timeouts["executor_recovery"])
+        except FuturesTimeout:
+            pool_rec.shutdown(wait=False)
+            logger.error("[executor_v2] Recovery LLM timed out after %ss for %s",
+                        timeouts["executor_recovery"], tid)
+            return {
+                "messages": [AIMessage(
+                    content=f"[{tid}] {skill_name} | RECOVERY TIMEOUT at step {failed_step.step_id}")],  # type: ignore[union-attr]
+                "execution_log": [
+                    f"[executor_v2] {tid} RECOVERY TIMEOUT after {timeouts['executor_recovery']}s"
+                ],
+                "last_result": SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.EXECUTION,
+                    error_type="RECOVERY_TIMEOUT",
+                    message=f"Recovery agent timed out after {timeouts['executor_recovery']}s.",
+                    suggestion="Retry manually or replan the task.",
+                    needs_hitl=True,
+                ),
+                "halt_flag":   True,
+                "halt_reason": "TASK_FAILURE",
+                "planned_steps": _planned_steps,
+                "recovered":     False,
+            }
     except _EscalateHITLException as e:
+        pool_rec.shutdown(wait=False)
         logger.error("[executor_v2] %s escalated to HITL: %s", tid, e.error_type)
         return {
             "messages": [AIMessage(
@@ -558,6 +612,8 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
             "planned_steps": _planned_steps,
             "recovered":     True,
         }
+    finally:
+        pool_rec.shutdown(wait=False)
 
     logger.info("[executor_v2] %s (%s) -> RECOVERED by LLM", tid, skill_name)
     return {
