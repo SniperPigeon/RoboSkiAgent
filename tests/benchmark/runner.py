@@ -13,7 +13,7 @@ from typing import Literal
 
 from langchain_core.language_models import BaseChatModel
 
-from SkiLib.RDK_Test import reset_station
+from SkiLib.sim_env import reset_station
 from SkiLib.log import get_logger
 from tests.benchmark.outcome_evaluator import evaluate_outcome
 from tests.benchmark.plan_evaluator import generate_and_score, score_from_jsonl

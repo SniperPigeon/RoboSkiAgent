@@ -37,6 +37,7 @@ from Agent.nodes.planner_v2 import planner_v2, _prompt_override
 from Agent.nodes.supervisor import supervisor, reset_supervisor_cache
 from Agent.state import GlobalState
 from SkiLib.log import get_logger
+from SkiLib.sim_env import setup_robot_env  # noqa: F401 — re-exported for callers
 
 logger = get_logger(__name__)
 
@@ -108,24 +109,6 @@ class PlannerTask(TypedDict):
 # checkpointer keyed by thread_id.  Sharing one compiled graph across
 # concurrent calls is safe as long as each call uses a unique thread_id.
 
-def setup_robot_env(debug_skip_check: bool = True) -> None:
-    """Initialize RobotContext and SkillMdLoader before running the graph.
-
-    Mirrors the setup performed by Agent/gui.py launch_gui(), adapted for the
-    V2 path (SkillMdLoader instead of SkillRegistry).
-
-    Args:
-        debug_skip_check: Skip IK/collision checks (True for simulation/training).
-    """
-    from SkiLib.robotcontext import RobotContext
-    from SkiLib.skill_loader import SkillMdLoader
-
-    ctx = RobotContext()
-    ctx.debug_skip_check = debug_skip_check
-    SkillMdLoader.instance()
-    logger.info("[setup] RobotContext + SkillMdLoader ready. debug_skip_check=%s", debug_skip_check)
-
-
 _graph: Any = None
 _graph_provider: str | None = None  # provider used to build current _graph
 
@@ -138,7 +121,7 @@ def _get_graph() -> Any:
         return _graph  # reuse cached graph if provider unchanged
     if _graph is not None and provider != _graph_provider:
         logger.info("[planning_agent] LLM provider changed (%s → %s), rebuilding graph", _graph_provider, provider)
-    setup_robot_env()
+    setup_robot_env(debug_skip_check=True)
     _graph = build_planning_graph()
     _graph_provider = provider
     logger.info("[planning_agent] graph built (provider=%s)", provider)

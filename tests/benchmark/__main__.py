@@ -17,7 +17,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from trainer.apoptimizer.planning_agent import setup_robot_env
+from SkiLib.sim_env import setup_robot_env
 
 load_dotenv(override=True)
 
@@ -135,14 +135,6 @@ def _build_executor_cases(repeat: int = 1) -> list:
     return expanded
 
 
-def _setup_robot():
-    from SkiLib.robotcontext import RobotContext
-    from SkiLib.skill_loader import SkillMdLoader
-    ctx = RobotContext()
-    SkillMdLoader.instance()
-    return ctx
-
-
 def main():
     parser = argparse.ArgumentParser(description="RoboSkiAgent benchmark runner")
     parser.add_argument(
@@ -172,7 +164,7 @@ def main():
     csv_log = CsvLogger(csv_path, mode=args.mode)
 
     if args.mode == "executor":
-        setup_robot_env()
+        setup_robot_env(debug_skip_check=True)
         from Agent.llm import create_llm
         from tests.benchmark.executor_eval import run_executor_eval
         llm = create_llm()
@@ -190,10 +182,10 @@ def main():
         from tests.benchmark.task_configs import load_task_configs, load_verifiable_tasks
 
         if args.mode == "full":
-            setup_robot_env()
+            setup_robot_env(debug_skip_check=True)
             tasks = load_verifiable_tasks()
         elif args.mode == "plan-gen":
-            setup_robot_env()    # supervisor needs RobotContext for scene queries
+            setup_robot_env(debug_skip_check=True)    # supervisor needs RobotContext for scene queries
             tasks = load_task_configs()
             tasks = tasks[args.continue_on:]  # for plan-gen mode, allow skipping cases to resume after crash
         else:  # plan — no RoboDK, no LLM

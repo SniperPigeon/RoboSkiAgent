@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from langchain_core.language_models import BaseChatModel
 
 from Agent.nodes.executor_v2 import executor_v2
-from SkiLib.RDK_Test import reset_station
+from SkiLib.sim_env import reset_station
 from SkiLib.verifiers import TaskVerifier, VerificationConfig
 from tests.benchmark.validators import SequenceScore, score_sequence
 
