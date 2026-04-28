@@ -2,19 +2,39 @@ from typing import List, Union
 
 from SkiLib.base import (
     BasePrimitive,
+    ERROR_IK_FAILURE,
     ERROR_INVALID_PARAM,
+    ERROR_TIMEOUT,
     ExecutionPhase,
     RobotState,
     SkillResult,
     require_robot_active,
 )
+from SkiLib.genesis.motion import (
+    IKResult,
+    control_to_qpos,
+    current_qpos,
+    get_tcp_pos,
+    interpolate_positions,
+    solve_ik,
+    validate_joint_target,
+)
 from SkiLib.genesis.types import SceneTarget
-
-ERROR_NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 
 
 def _snapshot(runtime) -> RobotState:
     return runtime.get_current_state()
+
+
+def _ik_failure_result(target_name: str, ik: IKResult) -> SkillResult:
+    return SkillResult(
+        success=False,
+        execution_phase=ExecutionPhase.PLANNING,
+        error_type=ERROR_IK_FAILURE,
+        message=f"Genesis IK failed for target '{target_name}'.",
+        suggestion="Check whether the target is inside the reachable workspace and whether the TCP orientation is feasible.",
+        data={"ik_error": ik.error.tolist()},
+    )
 
 
 class MoveJ(BasePrimitive):
@@ -25,27 +45,29 @@ class MoveJ(BasePrimitive):
 
     def check(self, target: Union[SceneTarget, List[float]], ref_frame=None) -> SkillResult:
         if isinstance(target, SceneTarget):
+            ik = solve_ik(self.runtime, target)
+            if not ik.success:
+                return _ik_failure_result(target.name, ik)
             return SkillResult(
-                success=False,
+                success=True,
                 execution_phase=ExecutionPhase.PLANNING,
-                error_type=ERROR_NOT_IMPLEMENTED,
-                message="Genesis MoveJ IK check is not implemented yet.",
-                suggestion="Implement Genesis IK in SkiLib/genesis/motion.py before executing motion tasks.",
-                data={"target": target.name},
+                message=f"MoveJ target '{target.name}' has a valid Genesis IK solution.",
+                data={"target": target.name, "qpos": ik.qpos.tolist() if ik.qpos is not None else None},
             )
         if isinstance(target, list):
-            if len(target) < len(self.runtime.bundle.arm_dofs):
+            try:
+                validate_joint_target(self.runtime, target)
+            except ValueError as e:
                 return SkillResult(
                     success=False,
                     execution_phase=ExecutionPhase.VALIDATION,
                     error_type=ERROR_INVALID_PARAM,
-                    message="Joint target does not contain enough arm DOF values.",
+                    message=str(e),
                 )
             return SkillResult(
-                success=False,
+                success=True,
                 execution_phase=ExecutionPhase.PLANNING,
-                error_type=ERROR_NOT_IMPLEMENTED,
-                message="Genesis MoveJ joint-list execution is not implemented yet.",
+                message="MoveJ joint target is valid.",
             )
         return SkillResult(
             success=False,
@@ -56,14 +78,53 @@ class MoveJ(BasePrimitive):
 
     @require_robot_active
     def execute(self, target: Union[SceneTarget, List[float]], blocking: bool = True, ref_frame=None) -> SkillResult:
-        return SkillResult(
-            success=False,
-            execution_phase=ExecutionPhase.EXECUTION,
-            error_type=ERROR_NOT_IMPLEMENTED,
-            robot_state=_snapshot(self.runtime),
-            message="Genesis MoveJ execution is not implemented yet.",
-            suggestion="Next migration step: implement IK, PD control, and convergence checks.",
-        )
+        try:
+            if isinstance(target, SceneTarget):
+                ik = solve_ik(self.runtime, target)
+                if not ik.success or ik.qpos is None:
+                    return _ik_failure_result(target.name, ik)
+                qpos = ik.qpos
+                target_name = target.name
+            elif isinstance(target, list):
+                qpos = validate_joint_target(self.runtime, target)
+                target_name = "joint_target"
+            else:
+                return SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.VALIDATION,
+                    error_type=ERROR_INVALID_PARAM,
+                    message="Invalid MoveJ target. Expected a SceneTarget or joint list.",
+                )
+
+            reached, final_error = control_to_qpos(self.runtime, qpos)
+            if not reached:
+                return SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.EXECUTION,
+                    error_type=ERROR_TIMEOUT,
+                    robot_state=_snapshot(self.runtime),
+                    message=f"MoveJ to '{target_name}' did not converge before timeout.",
+                    suggestion="Increase max_steps/tolerance or verify the target qpos is dynamically reachable.",
+                    data={"final_joint_error": final_error},
+                )
+
+            state = _snapshot(self.runtime)
+            return SkillResult(
+                success=True,
+                execution_phase=ExecutionPhase.EXECUTION,
+                robot_state=state,
+                message=f"MoveJ to '{target_name}' executed successfully.",
+                data={"joints": state.joints, "final_joint_error": final_error},
+            )
+        except Exception as e:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.EXECUTION,
+                error_type=ERROR_TIMEOUT,
+                robot_state=_snapshot(self.runtime),
+                message=f"MoveJ failed during Genesis execution: {type(e).__name__}",
+                suggestion="Check Genesis runtime state and target data.",
+            )
 
     def try_execute(self, target: Union[SceneTarget, List[float]], ref_frame=None, blocking: bool = True) -> SkillResult:
         if not self._should_skip_check():
@@ -79,6 +140,26 @@ class MoveL(BasePrimitive):
     def __init__(self, runtime):
         super().__init__(runtime)
 
+    def _waypoint_qpos(self, target: SceneTarget, steps: int = 20) -> tuple[list, IKResult | None]:
+        start = get_tcp_pos(self.runtime)
+        end = target.pose.pos
+        qpos_seed = current_qpos(self.runtime)
+        qposes = []
+
+        for pos in interpolate_positions(start, end, steps)[1:]:
+            waypoint = type(target.pose)(
+                name=f"{target.name}_waypoint",
+                pos=tuple(float(v) for v in pos),
+                quat=target.pose.quat,
+                kind=target.pose.kind,
+            )
+            ik = solve_ik(self.runtime, waypoint, init_qpos=qpos_seed)
+            if not ik.success or ik.qpos is None:
+                return qposes, ik
+            qposes.append(ik.qpos)
+            qpos_seed = ik.qpos
+        return qposes, None
+
     def check(self, target: SceneTarget, ref_frame=None) -> SkillResult:
         if not isinstance(target, SceneTarget):
             return SkillResult(
@@ -87,25 +168,62 @@ class MoveL(BasePrimitive):
                 error_type=ERROR_INVALID_PARAM,
                 message="Invalid MoveL target. Expected a SceneTarget.",
             )
+        qposes, failed = self._waypoint_qpos(target)
+        if failed is not None:
+            return _ik_failure_result(target.name, failed)
         return SkillResult(
-            success=False,
+            success=True,
             execution_phase=ExecutionPhase.PLANNING,
-            error_type=ERROR_NOT_IMPLEMENTED,
-            message="Genesis MoveL waypoint IK check is not implemented yet.",
-            suggestion="Implement Cartesian waypoint sampling and IK before executing linear motion tasks.",
-            data={"target": target.name},
+            message=f"MoveL target '{target.name}' has valid waypoint IK solutions.",
+            data={"target": target.name, "waypoints": len(qposes)},
         )
 
     @require_robot_active
     def execute(self, target: SceneTarget, ref_frame=None, blocking: bool = True) -> SkillResult:
-        return SkillResult(
-            success=False,
-            execution_phase=ExecutionPhase.EXECUTION,
-            error_type=ERROR_NOT_IMPLEMENTED,
-            robot_state=_snapshot(self.runtime),
-            message="Genesis MoveL execution is not implemented yet.",
-            suggestion="Next migration step: implement TCP pose interpolation and waypoint tracking.",
-        )
+        if not isinstance(target, SceneTarget):
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type=ERROR_INVALID_PARAM,
+                message="Invalid MoveL target. Expected a SceneTarget.",
+            )
+        try:
+            qposes, failed = self._waypoint_qpos(target)
+            if failed is not None:
+                return _ik_failure_result(target.name, failed)
+
+            max_error = 0.0
+            for qpos in qposes:
+                reached, final_error = control_to_qpos(self.runtime, qpos, max_steps=180, tolerance=0.04)
+                max_error = max(max_error, final_error)
+                if not reached:
+                    return SkillResult(
+                        success=False,
+                        execution_phase=ExecutionPhase.EXECUTION,
+                        error_type=ERROR_TIMEOUT,
+                        robot_state=_snapshot(self.runtime),
+                        message=f"MoveL to '{target.name}' did not converge at a waypoint.",
+                        suggestion="Increase waypoint tracking steps or reduce Cartesian step size.",
+                        data={"final_joint_error": final_error},
+                    )
+
+            state = _snapshot(self.runtime)
+            return SkillResult(
+                success=True,
+                execution_phase=ExecutionPhase.EXECUTION,
+                robot_state=state,
+                message=f"MoveL to '{target.name}' executed successfully.",
+                data={"joints": state.joints, "max_joint_error": max_error, "waypoints": len(qposes)},
+            )
+        except Exception as e:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.EXECUTION,
+                error_type=ERROR_TIMEOUT,
+                robot_state=_snapshot(self.runtime),
+                message=f"MoveL failed during Genesis execution: {type(e).__name__}",
+                suggestion="Check Genesis runtime state and target data.",
+            )
 
     def try_execute(self, target: SceneTarget, ref_frame=None, blocking: bool = True) -> SkillResult:
         if not self._should_skip_check():

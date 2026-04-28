@@ -289,17 +289,19 @@ requirements-legacy-robodk.txt   # 仅旧 RoboDK 参考，不参与主流程
 
 ### Phase 3：实现 Genesis Motion Primitives
 
-- 重写 `SkiLib/primitives/motion.py`。
-- 实现 `MoveJ.check/execute/try_execute`。
-- 实现 `MoveL.check/execute/try_execute`。
-- 为 IK failure、timeout、invalid target 映射现有 `SkillResult` 错误类型。
+- [x] 重写 `SkiLib/primitives/motion.py`。
+- [x] 新建 `SkiLib/genesis/motion.py`，集中封装 IK、TCP 查询、关节控制和 waypoint 插值。
+- [x] 实现 `MoveJ.check/execute/try_execute`。
+- [x] 实现 `MoveL.check/execute/try_execute`。
+- [x] 为 IK failure、timeout、invalid target 映射现有 `SkillResult` 错误类型。
+- [x] 添加 `tests/genesis_motion_smoke.py`，验证 Home → PartA_Approach → PartA_Pick。
 
 验收：
 
-- `MoveJ` 到 `Home_position`。
-- `MoveJ` 到各 approach target。
-- `MoveL` 从 approach 到 pick/place target。
-- 失败时不抛原始异常，统一返回 `SkillResult`。
+- [x] `MoveJ` 到 `Home_position`。
+- [x] `MoveL` 到 `PartA_Approach`。
+- [x] `MoveL` 从 approach 到 pick target。
+- [x] 失败时不抛原始异常，统一返回 `SkillResult`。
 
 ### Phase 4：实现 Genesis Gripper Primitives
 

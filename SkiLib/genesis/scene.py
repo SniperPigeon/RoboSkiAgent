@@ -18,7 +18,7 @@ TRAY_H = 0.04
 WALL_T = 0.01
 TRAY_POS = (0.80, 0.22, TABLE_H)
 ASSY_POS = (0.80, -0.22, TABLE_H)
-TCP_LINK_NAME = "tool0"
+TCP_LINK_NAME = "wrist_3_link"
 
 _GENESIS_INITIALIZED = False
 
@@ -189,10 +189,10 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
     scene.build()
 
     arm_home = np.array([0, -np.pi / 2, np.pi / 2, -np.pi / 2, -np.pi / 2, 0], dtype=float)
-    grip_home = np.zeros(6, dtype=float)
+    grip_home = np.zeros(max(0, int(robot.n_dofs) - 6), dtype=float)
     home_qpos = np.concatenate([arm_home, grip_home])
     arm_dofs = np.arange(6)
-    gripper_dofs = np.arange(6, min(12, int(robot.n_dofs)))
+    gripper_dofs = np.arange(6, int(robot.n_dofs))
 
     robot.set_dofs_kp(np.array([4000] * 6 + [200] * max(0, int(robot.n_dofs) - 6)))
     robot.set_dofs_kv(np.array([100] * 6 + [10] * max(0, int(robot.n_dofs) - 6)))

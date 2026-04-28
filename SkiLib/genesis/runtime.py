@@ -64,6 +64,7 @@ class GenesisRuntime:
 
     def get_current_state(self) -> RobotState:
         joints = None
+        pose = None
         try:
             qpos: Any = self.robot.get_qpos()
             if hasattr(qpos, "detach"):
@@ -74,9 +75,16 @@ class GenesisRuntime:
         except Exception:
             joints = None
 
+        try:
+            from SkiLib.genesis.motion import get_tcp_pos  # noqa: PLC0415
+
+            pose = get_tcp_pos(self).tolist()
+        except Exception:
+            pose = None
+
         return RobotState(
             joints=joints,
-            pose=None,
+            pose=pose,
             gripper_state="CLOSED" if self.held_item_name else "OPEN",
         )
 
