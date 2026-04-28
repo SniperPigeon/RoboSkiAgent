@@ -3,7 +3,6 @@ from abc import abstractmethod, ABC
 from dataclasses import dataclass, asdict
 from enum import Enum
 from typing import Callable, List, Dict, Any, Literal, Optional
-from robodk import robolink, robomath
 
 
 # ================ ExecutionPhase ================
@@ -37,8 +36,8 @@ class RobotState:
     Attributes:
         joints:        Current joint angles in degrees.
         pose:          Current TCP pose. Callers may store any convenient format
-                       (e.g. robomath.Mat, List[float]) — base.py stays platform-agnostic
-                       by using Any rather than importing platform-specific types.
+                       (e.g. nested list, ndarray-like object, simulator-native pose).
+                       base.py stays platform-agnostic by using Any.
         gripper_state: Gripper state — "OPEN" / "CLOSED" / "UNKNOWN".
     """
     joints:        Optional[List[float]] = None
@@ -139,7 +138,7 @@ class SkillResult:
         }
         if self.robot_state is not None:
             pose = self.robot_state.pose
-            # robomath.Mat is not JSON-serializable; convert to nested list.
+            # Simulator-native matrix/array objects are often not JSON-serializable.
             if hasattr(pose, "tolist"):
                 pose = pose.tolist()
             payload["robot_state"] = {
@@ -243,19 +242,18 @@ class BasePrimitive(ABC):
     """
     Base class for all robot primitives.
 
-    Primitives are platform-specific low-level implementations (e.g. RoboDK)
+    Primitives are platform-specific low-level implementations (e.g. Genesis)
     that are automatically instantiated and managed by PrimitiveRegistry.
 
     Implementation requirements:
-        1. Import platform-specific libraries (robodk, etc.) inside the module.
+        1. Keep platform-specific libraries out of base.py.
         2. Implement check() / execute() / try_execute(), all returning SkillResult.
         3. execute() must catch all exceptions internally — never let them propagate.
         4. Place the module inside the primitives/ directory for auto-discovery.
     """
 
-    def __init__(self, robot_object, RDK_object):
-        self.robot: robolink.Item     = robot_object
-        self.RDK:   robolink.Robolink = RDK_object
+    def __init__(self, runtime):
+        self.runtime = runtime
 
     @abstractmethod
     def check(self, *args, **kwargs) -> SkillResult:

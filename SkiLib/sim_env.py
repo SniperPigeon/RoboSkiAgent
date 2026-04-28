@@ -1,10 +1,7 @@
 """
 sim_env.py — Simulation environment bootstrapping.
 
-Genesis migration: to switch simulators, rewrite only:
-  - RobotContext.__init__    (connection + robot discovery)
-  - reset_station()          (scene reset program call)
-Everything else in this file and all callers are simulator-agnostic.
+Genesis runtime bootstrap helpers.
 """
 import os
 
@@ -35,13 +32,7 @@ def setup_robot_env(debug_skip_check: bool | None = None) -> RobotContext:
 
 
 def reset_station() -> None:
-    """Reset the simulation station to its initial state.
-
-    RoboDK: runs the built-in 'Reset Parts' program.
-    Genesis migration target: replace this body with the Genesis scene reset call.
-    """
-    ctx = RobotContext.instance()
-    if ctx is None:
-        raise RuntimeError("RobotContext not initialized. Call setup_robot_env() first.")
-    ctx.RDK.RunProgram("Reset Parts", wait_for_finished=True)
-    logger.info("[sim_env] Station reset completed.")
+    """Reset the Genesis simulation by rebuilding the RobotContext singleton."""
+    RobotContext._instance = None
+    RobotContext()
+    logger.info("[sim_env] Genesis scene reset completed.")

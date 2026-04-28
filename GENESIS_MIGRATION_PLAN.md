@@ -259,31 +259,33 @@ requirements-legacy-robodk.txt   # 仅旧 RoboDK 参考，不参与主流程
 
 ### Phase 1：抽出 Genesis Scene Runtime
 
-- 新建 `SkiLib/genesis/types.py`。
-- 新建 `SkiLib/genesis/scene.py`。
-- 新建 `SkiLib/genesis/runtime.py`。
-- 将 `res/genesis_scene_test.py` 的场景搭建迁移进去。
-- 添加 `Home_position` 和 approach targets。
+- [x] 新建 `SkiLib/genesis/types.py`。
+- [x] 新建 `SkiLib/genesis/scene.py`。
+- [x] 新建 `SkiLib/genesis/runtime.py`。
+- [x] 将 `res/genesis_scene_test.py` 的场景搭建迁移进去。
+- [x] 添加 `Home_position` 和 approach targets。
+- [x] 处理当前 macOS/conda headless 环境问题：Genesis CPU 名称 fallback、`XDG_CACHE_HOME`/`MPLCONFIGDIR` 重定向、headless 默认跳过 visualizer build。
 
 验收：
 
-- 可以通过 `RobotContext()` 初始化 Genesis。
-- 可以列出 targets、objects、tools。
-- 可以获取当前 `RobotState`。
+- [x] 可以通过 `RobotContext()` 初始化 Genesis。
+- [x] 可以列出 targets、objects、tools。
+- [x] 可以获取当前 `RobotState`。
 
 ### Phase 2：替换 RobotContext 和 metatools
 
-- 改造 `SkiLib/robotcontext.py` 为 Genesis context。
-- 改造 `SkiLib/metatools/informative.py`。
-- 改造 `SkiLib/sensors/gripper.py`。
-- 删除共享层 RoboDK import。
+- [x] 改造 `SkiLib/robotcontext.py` 为 Genesis context。
+- [x] 改造 `SkiLib/metatools/informative.py`。
+- [x] 改造 `SkiLib/sensors/gripper.py`。
+- [x] 删除共享层 RoboDK import。
+- [x] 将 `MoveJ` / `MoveL` / `Grasp` / `Release` 临时替换为 Genesis 占位 primitive，保证 registry 可启动。
 
 验收：
 
-- `list_targets()` 返回 Genesis targets。
-- `list_objects()` 返回 Genesis parts。
-- `check_item_exists("Part_A_1")` 返回 true。
-- 导入 `SkiLib.base` 不需要 `robodk`。
+- [x] `list_targets()` 返回 Genesis targets。
+- [x] `list_objects()` 返回 Genesis parts。
+- [x] `check_item_exists("Part_A_1")` 返回 true。
+- [x] 导入 `SkiLib.base` 不需要 `robodk`。
 
 ### Phase 3：实现 Genesis Motion Primitives
 

@@ -9,9 +9,7 @@ Rules:
 """
 
 import os
-from typing import cast
 from langchain_core.tools import tool
-from robodk import robolink
 
 from SkiLib.robotcontext import RobotContext
 
@@ -35,44 +33,31 @@ def _ctx() -> RobotContext:
 
 @tool
 def list_targets() -> list[str]:
-    """List all target names available in the RoboDK scene.
+    """List all target names available in the Genesis scene.
     Use this to discover valid pick/place/approach target names for task planning."""
-    return cast(list[str], _ctx().RDK.ItemList(filter=robolink.ITEM_TYPE_TARGET, list_names=True))
+    return _ctx().list_targets()
 
 
 @tool
 def list_objects() -> list[str]:
-    """List workpiece names available for manipulation in the RoboDK scene.
-    Returns only top-level objects — sub-components of fixtures or tables are excluded.
+    """List workpiece names available for manipulation in the Genesis scene.
     Use this to discover which parts are present and available for manipulation."""
-    ctx = _ctx()
-    items = ctx.RDK.ItemList(filter=robolink.ITEM_TYPE_OBJECT)
-    # Keep only objects whose immediate parent is NOT another object.
-    # Sub-components of tables/fixtures are children of an ITEM_TYPE_OBJECT parent;
-    # standalone workpieces are children of the station root or a reference frame.
     excluded = _excluded_objects()
-    result = []
-    for item in items:
-        if item.Name() in excluded:
-            continue
-        parent = item.Parent()
-        if not parent.Valid() or parent.Type() != robolink.ITEM_TYPE_OBJECT:
-            result.append(item.Name())
-    return result
+    return [name for name in _ctx().list_objects() if name not in excluded]
 
 
 @tool
 def list_tools() -> list[str]:
-    """List all tool names defined in the RoboDK scene.
+    """List all tool names defined in the Genesis scene.
     Use this to discover which end-effectors are available."""
-    return cast(list[str], _ctx().RDK.ItemList(filter=robolink.ITEM_TYPE_TOOL, list_names=True))
+    return _ctx().list_tools()
 
 
 @tool
 def check_item_exists(name: str) -> bool:
-    """Check whether an item with the given name exists in the RoboDK scene.
+    """Check whether an item with the given name exists in the Genesis scene.
     Use this to validate target or object names before including them in a plan."""
-    return _ctx().RDK.Item(name).Valid()
+    return _ctx().check_item_exists(name)
 
 
 @tool
