@@ -38,15 +38,16 @@ _CTX_NOT_INITIALIZED = SkillResult(
 
 
 def _resolve(name: str, ctx: RobotContext) -> Tuple[Optional[object], Optional[SkillResult]]:
-    """Resolve a symbol name to a RoboDK Item. Returns (item, None) on success or (None, error) on failure."""
-    obj = ctx.RDK.Item(name)
-    if not obj.Valid():
+    """Resolve a symbol name to a Genesis scene handle. Returns (item, None) on success or (None, error) on failure."""
+    try:
+        obj = ctx.resolve_item(name)
+    except KeyError:
         return None, SkillResult(
             success=False,
             execution_phase=ExecutionPhase.VALIDATION,
             error_type="ITEM_NOT_FOUND",
-            message=f"Item '{name}' not found in the RoboDK station.",
-            suggestion="Verify the name matches exactly what is shown in RoboDK's item tree.",
+            message=f"Item '{name}' not found in the Genesis scene.",
+            suggestion="Use list_targets() or list_objects() to discover valid symbols.",
         )
     return obj, None
 
@@ -55,8 +56,8 @@ class PickAndPlace(BaseSkill):
     """
     High-level pick and place skill.
 
-    All position/item arguments are RoboDK symbol names (strings).
-    Symbols are resolved to RoboDK Items internally via RobotContext.
+    All position/item arguments are Genesis symbol names (strings).
+    Symbols are resolved internally via RobotContext.
 
     Sequence (execute):
         1. initial_motion → Home_position  (initial_motion: MoveJ or MoveL, default MoveL)

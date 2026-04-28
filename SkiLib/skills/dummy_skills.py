@@ -1,4 +1,7 @@
 from SkiLib.base import BaseSkill, SkillResult, ExecutionPhase
+from SkiLib.log import get_logger
+
+logger = get_logger(__name__)
 
 
 class DummySkill(BaseSkill):
@@ -10,11 +13,11 @@ class DummySkill(BaseSkill):
 
     def __init__(self, primitives):
         super().__init__(primitives)
-        print(f"[DummySkill] __init__ called. Received primitives: {list(primitives.keys())}")
+        logger.debug("DummySkill initialized with primitives: %s", list(primitives.keys()))
 
     def check(self, message: str = "hello") -> SkillResult:
         """Check that the dummy skill is reachable. message is echoed back in data."""
-        print(f"[DummySkill] check() called with message={message!r}")
+        logger.debug("DummySkill.check called with message=%r", message)
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
@@ -24,7 +27,7 @@ class DummySkill(BaseSkill):
 
     def execute(self, message: str = "hello") -> SkillResult:
         """Execute the dummy skill. Does nothing except log and return success."""
-        print(f"[DummySkill] execute() called with message={message!r}")
+        logger.debug("DummySkill.execute called with message=%r", message)
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.EXECUTION,
@@ -34,7 +37,7 @@ class DummySkill(BaseSkill):
 
     def try_execute(self, message: str = "hello") -> SkillResult:
         """Run check then execute. Aborts on check failure."""
-        print(f"[DummySkill] try_execute() called with message={message!r}")
+        logger.debug("DummySkill.try_execute called with message=%r", message)
         result = self.check(message)
         if not result.success:
             return result

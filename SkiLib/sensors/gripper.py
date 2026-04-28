@@ -86,7 +86,7 @@ def _ctx() -> RobotContext:
 
 def _query_attachment(tool_name: str) -> dict:
     """
-    Query current gripper attachment state via RoboDK.
+    Query current gripper attachment state via GenesisRuntime.
 
     Args:
         tool_name: If non-empty, query this specific tool; otherwise uses the
@@ -98,19 +98,14 @@ def _query_attachment(tool_name: str) -> dict:
     ctx = _ctx()
 
     if tool_name:
-        from robodk import robolink  # noqa: PLC0415
-        tool = ctx.RDK.Item(tool_name)
-        if not tool.Valid():
+        if tool_name not in ctx.list_tools():
             return {
-                "error": f"Tool '{tool_name}' not found in RoboDK station.",
+                "error": f"Tool '{tool_name}' not found in Genesis scene.",
                 "active_tool": tool_name,
                 "grasped": [],
             }
-        grasped = [
-            c.Name() for c in tool.Childs()
-            if c.Type() == robolink.ITEM_TYPE_OBJECT
-        ]
-        return {"active_tool": tool_name, "grasped": grasped}
+        state = ctx.get_gripper_state()
+        return {"active_tool": tool_name, "grasped": state.get("grasped", [])}
 
     # Use RobotContext helper (handles active-tool resolution + real/sim branch)
     state = ctx.get_gripper_state()
