@@ -21,8 +21,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
 from SkiLib.log import get_logger, attach_queue_handler
-from SkiLib.registry import SkillRegistry
-from SkiLib.robotcontext import RobotContext
+from SkiLib.sim_env import setup_robot_env
 # ── Version switch ─────────────────────────────────────────────────────────
 # Set USE_V2 = True to run the skill.md-based planner/executor (V2 graph).
 # Set USE_V2 = False to run the original Python BaseSkill graph (V1).
@@ -150,11 +149,7 @@ def launch_gui(
         log_queue = _queue_module.Queue()
         attach_queue_handler(log_queue)
 
-    # Initialize RoboDK context once before building the graph
-    context = RobotContext()
-    context.debug_skip_check = debug_skip_check
-    SkillRegistry.instance()
-    logger.info("[gui] RobotContext ready. debug_skip_check=%s", debug_skip_check)
+    setup_robot_env(debug_skip_check=debug_skip_check)
 
     if graph is None:
         graph = build_graph()

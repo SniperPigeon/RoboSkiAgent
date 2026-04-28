@@ -10,20 +10,26 @@ from robodk import robomath
 
 from SkiLib.robotcontext import RobotContext
 from SkiLib.sensors.gripper import _query_attachment    # Robot toolbox
-RDK = robolink.Robolink()
 
 # Forward and backwards compatible use of the RoboDK API:
 # Remove these 2 lines to follow python programming guidelines
 from robodk import *      # RoboDK API
 from robolink import *    # Robot toolbox
-# Link to RoboDK
 from SkiLib.log import get_logger
-logger = get_logger(__name__) 
+logger = get_logger(__name__)
+
+# re-export so old imports keep working
+from SkiLib.sim_env import reset_station  # noqa: F401
+
+
+def _rdk():
+    """Lazy accessor — returns the RDK connection from the RobotContext singleton."""
+    return RobotContext().RDK
 
 def get_Robot_Type():
-    # Retrieve the robot item. Passing an empty string and the item type 
+    # Retrieve the robot item. Passing an empty string and the item type
     # will get the first available robot in the station.
-    robot = RDK.Item('', ITEM_TYPE_ROBOT)
+    robot = _rdk().Item('', ITEM_TYPE_ROBOT)
 
     if not robot.Valid():
         print("No robot found in the station.")
@@ -43,8 +49,8 @@ def get_Tool_Name():
     Returns: String - the name of the tool attached to the robot as named in the RoboDK tree
     
     '''
-    robot = RDK.Item('', ITEM_TYPE_ROBOT)
-    
+    robot = _rdk().Item('', ITEM_TYPE_ROBOT)
+
     tool = robot.getLink(ITEM_TYPE_TOOL)
 
     if tool.Valid():
@@ -65,7 +71,7 @@ def run_Predefined_Programs(progName, wait_for_finish):
     
     Return: None  
     '''
-    RDK.RunProgram(progName, wait_for_finish)
+    _rdk().RunProgram(progName, wait_for_finish)
     
     print("Completed")
 
@@ -78,7 +84,7 @@ def read_Robot_Pose():
     Returns : list[float] ([X,Y,Z, u,v,w] representation (position in mm and orientation vector in radians))
 
     '''
-    robot  = RDK.Item('', ITEM_TYPE_ROBOT)  # Retrieve a robot available in RoboDK
+    robot  = _rdk().Item('', ITEM_TYPE_ROBOT)  # Retrieve a robot available in RoboDK
     pose = robot.Pose()                     # retrieve the current robot position as a pose (position of the active tool with respect to the active reference frame)
 
     # Read the 4x4 pose matrix as [X,Y,Z, u,v,w] representation (position in mm and orientation vector in radians): same representation as Universal Robots
@@ -96,7 +102,7 @@ def get_Frame_pose(frame):
 
     '''
 
-    frame = RDK.Item(str(frame), robolink.ITEM_TYPE_FRAME)
+    frame = _rdk().Item(str(frame), robolink.ITEM_TYPE_FRAME)
 
     if frame.Valid():
         # Get the pose relative to its parent frame
@@ -125,7 +131,7 @@ def set_Frame_Pose(frame,new_pose):
     Return type: 
     '''
 
-    frame = RDK.Item(str(frame), robolink.ITEM_TYPE_FRAME)
+    frame = _rdk().Item(str(frame), robolink.ITEM_TYPE_FRAME)
 
     if frame.Valid():
         # Define new coordinates: [X, Y, Z, RX, RY, RZ]
@@ -150,7 +156,7 @@ def individual_Joint_Move(joint_index,degree,relative =False):
     
     Return type: 
     '''
-    robot = RDK.Item('', ITEM_TYPE_ROBOT)
+    robot = _rdk().Item('', ITEM_TYPE_ROBOT)
     # Get current joint values (returns a list of floats)
     joints = robot.Joints().list()
 
@@ -295,8 +301,8 @@ def test_moveL():
     '''
     测试线性运动路径检查功能
     '''
-    robot = RDK.Item('', ITEM_TYPE_ROBOT)
-    target = RDK.Item("App Pick Part A", robolink.ITEM_TYPE_TARGET)
+    robot = _rdk().Item('', ITEM_TYPE_ROBOT)
+    target = _rdk().Item("App Pick Part A", robolink.ITEM_TYPE_TARGET)
     
     print("\n=== 方法1: 使用 MoveL_Test (会暂时移动机器人) ===")
     result = check_linear_path(robot, target, restore_position=True)
@@ -316,25 +322,15 @@ def test_moveL():
         print("✗ 路径验证失败")
         
 
-def reset_station():
-    '''
-    这个函数可以用来重置RoboDK场景到初始状态，适用于测试前的准备工作。
-    你需要在RoboDK中创建一个程序（例如“Reset Station”），包含所有必要的步骤来重置场景。
-    '''
-    RDK.RunProgram("Reset Parts", wait_for_finished=True)
-    logger.info("Station reset completed.")
-    print("Station reset completed.")
-
-if __name__=="__main__":
-    robot = RDK.Item('', ITEM_TYPE_ROBOT)
+if __name__ == “__main__”:
     ctx = RobotContext()
     get_Robot_Type()
     get_Tool_Name()
-    
-    frame_partA = RDK.Item(str("Part_A_1 Frame"), robolink.ITEM_TYPE_FRAME)
-    start_partA = RDK.Item("Home A", robolink.ITEM_TYPE_TARGET)
-    target_partA = RDK.Item("App Pick Part A", robolink.ITEM_TYPE_TARGET)
-    print(_query_attachment("Gripper Extension"))
+
+    frame_partA = _rdk().Item(str(“Part_A_1 Frame”), robolink.ITEM_TYPE_FRAME)
+    start_partA  = _rdk().Item(“Home A”, robolink.ITEM_TYPE_TARGET)
+    target_partA = _rdk().Item(“App Pick Part A”, robolink.ITEM_TYPE_TARGET)
+    print(_query_attachment(“Gripper Extension”))
     
     # robot.setSpeed(speed_linear=-1, speed_joints=4)
     # RDK.setCollisionActive(False) # Bypass collision testing

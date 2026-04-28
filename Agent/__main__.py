@@ -28,12 +28,9 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # Initialize RobotContext (required before build_graph)
-    from SkiLib.robotcontext import RobotContext
-    context = RobotContext()
-    skip_check_env = os.getenv("ROBOSKI_SKIP_CHECK", "false").lower() in ("1", "true", "yes")
-    if args.skip_check or skip_check_env:
-        context.debug_skip_check = True
+    from SkiLib.sim_env import setup_robot_env
+    # args.skip_check=True forces on; False falls back to ROBOSKI_SKIP_CHECK env var
+    setup_robot_env(debug_skip_check=True if args.skip_check else None)
 
     from Agent.graph import build_graph, make_initial_state
     from Agent.nodes.supervisor import reset_supervisor_cache
