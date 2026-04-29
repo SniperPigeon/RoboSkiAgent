@@ -2,7 +2,7 @@ import os
 from langchain_core.language_models import BaseChatModel
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 # Timeout (seconds) per LLM phase, keyed by provider.
 # ollama runs locally and is significantly slower than remote API calls.
@@ -28,11 +28,11 @@ def create_llm(provider: str = None, **kwargs) -> BaseChatModel: #typ: ignore
         # Set HTTP timeout = longest node timeout so the connection closes before
         # the ThreadPoolExecutor wrapper fires, preventing zombie background threads.
         timeout  = max(get_node_timeouts().values())
-        return ChatAnthropic(name=model, timeout=timeout, **kwargs)
+        return ChatAnthropic(model_name=model, timeout=timeout, **kwargs)
 
     elif provider == "ollama":
         from langchain_ollama import ChatOllama
-        load_dotenv()  # ensure env vars are reloaded
+        load_dotenv(override=True)  # ensure env vars are reloaded
         model_id = os.getenv("OLLAMA_MODEL_ID", "qwen3:latest")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         return ChatOllama(model=model_id, base_url=base_url, temperature=0, **kwargs)
