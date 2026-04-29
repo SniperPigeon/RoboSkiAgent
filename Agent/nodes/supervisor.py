@@ -23,14 +23,34 @@ def _load_prompt(name: str) -> str:
 
 
 # ---- SupervisorOutput schema ---------------------------------------------------
+class SceneSnapshot(BaseModel):
+    """Symbolic scene state — no coordinates, only names."""
+    targets: list[str] = Field(
+        default_factory=list,
+        description="All target names from the scene (pick/place/approach points).",
+    )
+    objects: list[str] = Field(
+        default_factory=list,
+        description="Workpiece names relevant to this task.",
+    )
+    tools: list[str] = Field(
+        default_factory=list,
+        description="End-effector / tool names available.",
+    )
+
+
 class SupervisorOutput(BaseModel):
     """Fact sheet produced after knowledge saturation. Symbol-only, no coordinates."""
     task_intent_original: str = Field(description="Verbatim user instruction")
     task_intent: str = Field(
-        description="Rewritten instruction using exact RoboDK symbol names"
+        description=(
+            "Detailed step-by-step rewrite of the instruction using exact symbol names "
+            "and skill names from the scene snapshot."
+        )
     )
-    scene: dict = Field(
-        description="Keys: targets (list[str]), objects (list[str]), tools (list[str])"
+    scene: SceneSnapshot = Field(
+        default_factory=SceneSnapshot,
+        description="Populated from the pre-fetched scene snapshot in the system prompt.",
     )
     # available_skills: injected by code, not filled by LLM
     extra_info: str = Field(
@@ -50,12 +70,29 @@ def _get_available_skills() -> dict:
     }
 
 
+def _build_scene_snapshot() -> str:
+    """Pre-fetch scene info from RobotContext so the LLM always has it."""
+    from SkiLib.robotcontext import RobotContext
+    ctx = RobotContext.instance()
+    if ctx is None:
+        return "  (scene not initialized)"
+    lines = [
+        f"  Targets (pick/place/approach points): {ctx.list_targets()}",
+        f"  Objects (graspable workpieces):       {ctx.list_objects()}",
+        f"  Tools (end-effectors):                {ctx.list_tools()}",
+    ]
+    return "\n".join(lines)
+
+
 def _build_supervisor_prompt() -> str:
     skills_text = "\n".join(
         f"  - {name}: {doc.strip()}"
         for name, doc in _get_available_skills().items()
     ) or "  (none registered)"
-    return _load_prompt("supervisor.txt").format(skills_text=skills_text)
+    return _load_prompt("supervisor.txt").format(
+        skills_text=skills_text,
+        scene_snapshot=_build_scene_snapshot(),
+    )
 
 
 # ---- Lazy agent cache (keyed by llm id to survive LLM hot-swap) ---------------
@@ -111,7 +148,7 @@ def supervisor(state: GlobalState, *, llm: BaseChatModel) -> dict:
         summary = SupervisorOutput(
             task_intent_original=raw_str,
             task_intent=raw_str,
-            scene={},
+            scene=SceneSnapshot(),
             extra_info="response_format unsupported — stub fallback",
         )
         logger.warning("[supervisor] structured_response missing, using stub fallback")

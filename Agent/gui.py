@@ -9,6 +9,26 @@ Usage:
     from Agent.gui import launch_gui
     launch_gui(graph)
 """
+# On macOS, pyglet (used by Genesis viewer) requires an NSApplication context that
+# only exists when running via python.app.  Re-exec directly with the python.app
+# binary (not the pythonw shell wrapper, which requires an extra fork).
+import sys as _sys
+import os as _os
+# if _sys.platform == "darwin" and "python.app" not in _sys.executable:
+#     from pathlib import Path as _Path
+#     # python.app lives two levels up from the conda env's bin/python
+#     _python_app = _Path(_sys.executable).parent.parent / "python.app/Contents/MacOS/python"
+#     if _python_app.exists():
+#         _os.environ.setdefault("PYTHONEXECUTABLE", _sys.executable)
+#         _os.execv(str(_python_app), [str(_python_app)] + _sys.argv)
+
+# If window cannot hold on macos, decomment this to force cocoa
+# TODO: macOS下打不开viewer，据查询可能是因为pyglet在pip上的版本无法正确处理OpenGL3+，后面先去linux环境试试
+import platform, os
+if platform.system() == "Darwin":
+    # Force Cocoa app activation so pyglet window survives
+    os.environ.setdefault("PYOBJUS_MACOS_APPKIT_THREAD_CHECK", "0")
+    
 import logging
 import os
 import queue as _queue_module
@@ -20,6 +40,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
+from SkiLib.genesis.controller import GenesisController
 from SkiLib.log import get_logger, attach_queue_handler
 from SkiLib.sim_env import setup_robot_env
 # ── Version switch ─────────────────────────────────────────────────────────
@@ -37,7 +58,7 @@ from Agent.nodes.supervisor import reset_supervisor_cache
 
 def _setup_env() -> None:
     """Load .env and auto-enable LangSmith tracing if API key is present."""
-    load_dotenv()
+    load_dotenv(override=True)
     if os.getenv("LANGSMITH_API_KEY") and not os.getenv("LANGSMITH_TRACING"):
         os.environ["LANGSMITH_TRACING"] = "true"
     if os.getenv("LANGSMITH_TRACING", "false").lower() == "true":
@@ -149,7 +170,13 @@ def launch_gui(
         log_queue = _queue_module.Queue()
         attach_queue_handler(log_queue)
 
-    setup_robot_env(debug_skip_check=debug_skip_check)
+    ctx = setup_robot_env(debug_skip_check=debug_skip_check)
+
+    # Attach a GenesisController so all scene.step() calls are serialised onto
+    # one thread.  On macOS the pyrender viewer cannot run in a background thread,
+    # so we run Gradio non-blocking and keep the main thread for Genesis.
+    genesis_ctrl = GenesisController(ctx.runtime)
+    ctx.runtime.controller = genesis_ctrl
 
     if graph is None:
         graph = build_graph()
@@ -253,9 +280,18 @@ def launch_gui(
         for btn in buttons:
             btn.click(fn=handle_choice, inputs=[btn, feedback_box, session_state], outputs=all_outputs)
 
+    # prevent_thread_lock=True lets Gradio start in background threads so the
+    # main thread is free to run the Genesis controller loop below.
+    kwargs.setdefault("prevent_thread_lock", True)
     demo.launch(**kwargs)
+
+    try:
+        genesis_ctrl.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        genesis_ctrl.stop()
 
 
 if __name__ == "__main__":
-    
     launch_gui()

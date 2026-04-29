@@ -70,7 +70,7 @@ def build_graph_v2(
         from langgraph.checkpoint.memory import MemorySaver
         from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
         serde = JsonPlusSerializer(
-            allowed_msgpack_modules=[("SkiLib.base", "SkillResult"), ("SkiLib.base", "ExecutionPhase")]
+            allowed_json_modules=[("SkiLib.base", "SkillResult"), ("SkiLib.base", "ExecutionPhase")]
         )
         checkpointer = MemorySaver(serde=serde)
 
