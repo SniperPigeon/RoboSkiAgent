@@ -12,6 +12,13 @@ from pathlib import Path
 import numpy as np
 import genesis as gs
 
+# If window cannot hold on macos, decomment this to force cocoa
+
+# import platform, os
+# if platform.system() == "Darwin":
+#     # Force Cocoa app activation so pyglet window survives
+#     os.environ.setdefault("PYOBJUS_MACOS_APPKIT_THREAD_CHECK", "0")
+    
 RES = Path(__file__).parent
 
 gs.init(backend=gs.cpu, logging_level="warning")
@@ -114,7 +121,7 @@ print(f"Named targets: {list(NAMED_TARGETS.keys())}")
 
 # ── PD control — hold home position ──────────────────────────────────────────
 arm_home  = np.array([0, -np.pi/2, np.pi/2, -np.pi/2, -np.pi/2, 0], dtype=float)
-grip_home = np.zeros(6)
+grip_home = np.zeros(max(0, int(robot.n_dofs) - 6))
 home_qpos = np.concatenate([arm_home, grip_home])
 
 robot.set_dofs_kp(np.array([4000]*6 + [200]*6))

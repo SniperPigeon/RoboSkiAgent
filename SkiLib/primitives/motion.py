@@ -78,6 +78,9 @@ class MoveJ(BasePrimitive):
 
     @require_robot_active
     def execute(self, target: Union[SceneTarget, List[float]], blocking: bool = True, ref_frame=None) -> SkillResult:
+        return self._submit_to_controller(self._execute_body, target, blocking, ref_frame)
+
+    def _execute_body(self, target: Union[SceneTarget, List[float]], blocking: bool = True, ref_frame=None) -> SkillResult:
         try:
             if isinstance(target, SceneTarget):
                 ik = solve_ik(self.runtime, target)
@@ -180,6 +183,9 @@ class MoveL(BasePrimitive):
 
     @require_robot_active
     def execute(self, target: SceneTarget, ref_frame=None, blocking: bool = True) -> SkillResult:
+        return self._submit_to_controller(self._execute_body, target, ref_frame, blocking)
+
+    def _execute_body(self, target: SceneTarget, ref_frame=None, blocking: bool = True) -> SkillResult:
         if not isinstance(target, SceneTarget):
             return SkillResult(
                 success=False,

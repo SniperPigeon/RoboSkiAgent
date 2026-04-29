@@ -19,6 +19,12 @@ class GenesisRuntime:
         self.scene = self.bundle.scene
         self.robot = self.bundle.robot
         self.held_item_name: str | None = None
+        # Cached weld pair (obj_link.idx, tcp_link.idx) for the active grasp
+        self._weld_pair: tuple[int, int] | None = None
+
+    @property
+    def rigid_solver(self):
+        return self.scene.sim.rigid_solver
 
     @property
     def robot_name(self) -> str:

@@ -271,6 +271,18 @@ class BasePrimitive(ABC):
         ctx = RobotContext.instance()
         return ctx is not None and bool(ctx.debug_skip_check)
 
+    def _submit_to_controller(self, fn: Callable, /, *args, **kwargs) -> 'SkillResult':
+        """Run *fn* on the GenesisController thread if one is attached, else inline.
+
+        Ensures all scene.step() calls are serialised onto the thread that owns
+        the OpenGL / Taichi context.  When no controller is set (CLI / test mode)
+        *fn* is called directly on the current thread.
+        """
+        ctrl = getattr(self.runtime, "controller", None)
+        if ctrl is not None and not ctrl.is_genesis_thread():
+            return ctrl.submit(fn, *args, **kwargs)
+        return fn(*args, **kwargs)
+
     @abstractmethod
     def try_execute(self, *args, **kwargs) -> SkillResult:
         """Run check(), then execute() if the check passed. Returns a single SkillResult."""
