@@ -1,5 +1,188 @@
 # SkiLib 架构设计
 
+> **迭代说明**：本文档原描述 RoboDK 后端架构（见文末"历史参考"章节），当前实现已完整迁移至 Genesis。下方各节描述现状。
+
+---
+
+## 当前实现：Genesis 后端（2026-05-04）
+
+### 架构总览
+
+```mermaid
+graph TB
+    subgraph Agent["Agent Layer (LangGraph)"]
+        EXE["🤖 Executor\nnodes/executor_v2.py"]
+        SUP["🔍 Supervisor\nnodes/supervisor.py"]
+    end
+
+    subgraph SkiLib["SkiLib · Skill Library (no LangGraph dependency)"]
+        subgraph Reg["Registry / Context"]
+            SR["SkillRegistry\nauto-scans skills/"]
+            RC["RobotContext\nGenesis singleton"]
+        end
+        subgraph Skills["Skills · platform-agnostic"]
+            PaP["PickAndPlace\n8-step sequence"]
+        end
+        subgraph Prims["Primitives · Genesis-bound"]
+            MJ["MoveJ"] & ML["MoveL"]
+            GR["Grasp"] & RE["Release"]
+        end
+        subgraph Genesis["SkiLib/genesis/"]
+            GRT["GenesisRuntime\nscene + registries"]
+            GSC["build_genesis_scene()\nUR16e + objects + targets"]
+            GMO["motion.py\nsolve_ik / control_to_qpos"]
+            GCT["GenesisController\nmacOS thread serializer"]
+        end
+    end
+
+    GS(["⚙️ Genesis Physics Engine\ngs.Scene / gs.Robot"])
+
+    EXE -->|"get_skill(name)"| SR
+    SUP -->|"T-skills"| SR
+    SR --> PaP
+    PaP --> MJ & ML & GR & RE
+    RC --> GRT
+    MJ & ML & GR & RE -->|"solve_ik / control_to_qpos"| GMO
+    GMO -->|"scene.step()"| GRT
+    GRT --> GS
+    GCT -.->|"序列化 step() 到主线程"| GRT
+
+    style Agent fill:#dbeafe,stroke:#3b82f6
+    style Skills fill:#d1fae5,stroke:#10b981
+    style Prims fill:#fce7f3,stroke:#ec4899
+    style Reg fill:#fef3c7,stroke:#f59e0b
+    style Genesis fill:#ede9fe,stroke:#7c3aed
+```
+
+### 关键组件
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| `GenesisRuntime` | `genesis/runtime.py` | 场景单例，持有 scene/robot/targets/objects 注册表 |
+| `build_genesis_scene()` | `genesis/scene.py` | 工厂：加载 URDF，创建 UR16e + Robotiq 2F-85 + 零件 + 目标点 |
+| `solve_ik()` | `genesis/motion.py` | 包装 `robot.inverse_kinematics()`，返回 `IKResult` |
+| `control_to_qpos()` | `genesis/motion.py` | PD 控制循环，最多 `max_steps` 次 `scene.step()` |
+| `GenesisController` | `genesis/controller.py` | 把所有 `scene.step()` 序列化到单一线程（macOS viewer 限制） |
+| `RobotContext` | `robotcontext.py` | 单例门面，名称不变以保持上游调用兼容 |
+
+---
+
+### 仿真入口与运行模式
+
+#### 进入仿真
+
+| 命令 | viewer | 模式 |
+|------|--------|------|
+| `ROBOSKI_GENESIS_VIEWER=1 python -m Agent.gui` | ✅ | 交互 GUI + 实时可视化 |
+| `python -m Agent.gui` | ❌ headless | 交互 GUI，无 viewer |
+| `python -m Agent "把零件放到目标点"` | ❌ headless | CLI 单次运行（V2 graph） |
+| `python res/genesis_scene_test.py` | ✅ | 裸场景测试，无 Agent |
+| `python SkiLib/main.py` | ❌ | T-skills 调试，无 Agent |
+
+**环境变量**
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `ROBOSKI_GENESIS_VIEWER` | `0` | `1` 开启 viewer |
+| `ROBOSKI_GENESIS_BACKEND` | `cpu` | `cpu` / `gpu` |
+| `ROBOSKI_SKIP_CHECK` | 未设 | `1` 跳过 IK/碰撞检查 |
+
+#### `scene.step()` 的两种驱动方式
+
+**有 viewer（GUI）**
+```
+主线程：GenesisController.run()
+  ├─ 有任务：执行 fn() → scene.step()
+  └─ 空闲：hold position → scene.step()   ← ~60 fps 实时循环
+后台线程：Gradio + LangGraph Agent
+```
+
+**无 viewer（CLI/headless）**
+```
+没有空跑循环。scene.step() 只在 primitive 执行期间被
+control_to_qpos() 驱动（最多 240 步 / primitive）。
+```
+
+---
+
+### LLM RL 后训练兼容性分析
+
+> 这里讨论的是用 Genesis 作为 **reward oracle**，对 LLM Agent 进行 RL 后训练（GRPO / PPO / REINFORCE 等），而不是训练运动控制 policy。
+
+#### 适合做什么
+
+用 Genesis 环境验证 LLM 生成的装配计划是否真实可执行，将任务成功/失败作为稀疏 reward 信号，反向更新 LLM 权重（类似 DeepSeek-R1 / Tulu 中的 process reward）。
+
+```
+LLM 采样 N 条 rollout（自然语言计划 → tool calls）
+       ↓
+Genesis 执行每条 rollout，返回 success / error_type / steps_taken
+       ↓
+reward = success_flag ± shaping（可选：步骤数惩罚、IK 失败惩罚等）
+       ↓
+GRPO / PPO 更新 LLM 权重
+```
+
+#### 现有架构对这个流程的支持程度
+
+**已经兼容 ✅**
+
+- `SkillResult.success` / `error_type` / `suggestion` 已是结构化 reward 信号，不需要额外包装
+- `GenesisRuntime` 是纯 Python 对象，可在子进程/线程中独立实例化，适合并发 rollout
+- `build_genesis_scene()` 是无副作用工厂函数，每次调用建立独立场景，适合多环境并行
+- `_GENESIS_INITIALIZED` 全局锁已处理重复 `gs.init()` 问题，多进程时各进程独立初始化不冲突
+- Primitives 的 `try_execute()` 已捕获所有异常并返回 `SkillResult`，不会让 rollout worker crash
+
+**需要改造 ⚠️**
+
+1. **rollout 需要 scene reset**
+
+   当前无 `reset()` 方法。每个 episode 需要重建场景（重新调用 `build_genesis_scene()`），开销较高。
+   
+   **建议**：在 `GenesisRuntime` 中增加 `reset()` 方法，通过 `robot.set_dofs_position(home_qpos)` + `entity.set_pos()` 复位，避免重建 scene。
+
+2. **GenesisController 线程模型不适合多进程 rollout**
+
+   RL rollout 通常用多进程（`multiprocessing` 或 Ray worker），而 `GenesisController` 是单进程内的线程序列化器。多进程场景下每个 worker 应拥有自己的 `GenesisRuntime`，不需要 `GenesisController`（无 viewer）。
+
+3. **rollout worker 应以 headless 模式运行**
+
+   ```python
+   # rollout worker 的正确初始化方式
+   os.environ["ROBOSKI_GENESIS_VIEWER"] = "0"
+   runtime = GenesisRuntime(show_viewer=False)
+   # 直接调用 primitive，不走 GenesisController
+   ```
+
+4. **reward shaping 需要新增中间信号**
+
+   `SkillResult` 目前缺少：执行步数、IK 求解迭代次数、末端轨迹长度等 dense reward 候选项。可在 `control_to_qpos()` 返回值中附加这些信息。
+
+#### 推荐的 rollout 收集架构（供参考）
+
+```
+训练进程（LLM + GRPO trainer）
+   │
+   ├─ rollout_worker_0 (subprocess)
+   │     └─ GenesisRuntime(headless) + SkillRegistry
+   │         执行 LLM plan → 返回 (plan, reward, trace)
+   │
+   ├─ rollout_worker_1
+   │     └─ GenesisRuntime(headless) + SkillRegistry
+   │
+   └─ ... × N workers
+```
+
+各 worker 无 viewer、无 `GenesisController`，`scene.step()` 直接由 `control_to_qpos()` 驱动，性能最优。
+
+---
+
+## 历史参考：原 RoboDK 架构（已废弃）
+
+> 以下内容描述 Genesis 迁移前的 RoboDK 架构，保留以记录迭代过程。
+
+---
+
 ## 🎯 核心设计原则
 
 ### 1️⃣ 分层解耦
