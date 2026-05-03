@@ -6,15 +6,10 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from SkiLib.registry import SkillRegistry
-
-
-
-from robodk import robolink
 from SkiLib.robotcontext import RobotContext
 
 # ============= Initialize =============
 context = RobotContext()
-RDK   = context.RDK
 robot = context.robot
 skill_registry = SkillRegistry.instance()
 

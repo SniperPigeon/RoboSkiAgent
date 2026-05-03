@@ -12,12 +12,10 @@ from pathlib import Path
 import numpy as np
 import genesis as gs
 
-# If window cannot hold on macos, decomment this to force cocoa
-
-# import platform, os
-# if platform.system() == "Darwin":
-#     # Force Cocoa app activation so pyglet window survives
-#     os.environ.setdefault("PYOBJUS_MACOS_APPKIT_THREAD_CHECK", "0")
+import platform, os
+if platform.system() == "Darwin":
+    # Force Cocoa app activation so pyglet window survives
+    os.environ.setdefault("PYOBJUS_MACOS_APPKIT_THREAD_CHECK", "0")
     
 RES = Path(__file__).parent
 

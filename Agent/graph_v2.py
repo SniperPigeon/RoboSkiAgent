@@ -27,7 +27,6 @@ if __name__ == "__main__":
 from functools import partial
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
@@ -127,25 +126,7 @@ def build_graph_v2(
     return builder.compile(checkpointer=checkpointer)
 
 
-def make_initial_state(prompt: str) -> dict:
-    """Build the initial GlobalState dict for a new V2 run.
-
-    Identical to graph.py's make_initial_state — state schema is unchanged.
-    """
-    return {
-        "messages":            [HumanMessage(content=prompt)],
-        "todo_list":           [],
-        "current_task":        {},
-        "robot_state":         {},
-        "halt_flag":           False,
-        "halt_reason":         None,
-        "last_result":         None,
-        "supervisor_action":   None,
-        "plan_review_action":  None,
-        "intervention_action": None,
-        "hitl_command":        None,
-        "execution_log":       [],
-    }
+from Agent.graph import make_initial_state as make_initial_state  # noqa: F401
 
 
 if __name__ == "__main__":

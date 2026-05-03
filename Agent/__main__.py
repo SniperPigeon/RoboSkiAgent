@@ -32,7 +32,8 @@ def main():
     # args.skip_check=True forces on; False falls back to ROBOSKI_SKIP_CHECK env var
     setup_robot_env(debug_skip_check=True if args.skip_check else None)
 
-    from Agent.graph import build_graph, make_initial_state
+    from Agent.graph_v2 import build_graph_v2 as build_graph
+    from Agent.graph import make_initial_state
     from Agent.nodes.supervisor import reset_supervisor_cache
     reset_supervisor_cache()
 
