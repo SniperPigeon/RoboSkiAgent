@@ -16,9 +16,10 @@ from pathlib import Path
 from xml.dom import minidom
 import xml.etree.ElementTree as ET
 
-UR_DESC  = Path("/Users/yukun/projects/RoboSkiAgent/temp/Universal_Robots_ROS2_Description")
-ROBOTIQ  = Path("/Users/yukun/projects/RoboSkiAgent/temp/robotiq/robotiq_2f_85_gripper_visualization")
-OUT      = Path("/Users/yukun/projects/RoboSkiAgent/res/ur16e_robotiq.urdf")
+_REPO    = Path(__file__).resolve().parents[1]
+UR_DESC  = _REPO / "temp/Universal_Robots_ROS2_Description"
+ROBOTIQ  = _REPO / "temp/Robotiq-2f-85/robotiq_2f_85_gripper_visualization"
+OUT      = _REPO / "res/ur16e_robotiq.urdf"
 
 # ── Mock ament_index_python ──────────────────────────────────────────────────
 PKG_MAP = {
