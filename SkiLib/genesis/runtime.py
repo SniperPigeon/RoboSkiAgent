@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import numpy as np
+
 from SkiLib.base import RobotState
 from SkiLib.genesis.scene import build_genesis_scene
 from SkiLib.genesis.types import GenesisSceneBundle, SceneObject, SceneTarget
@@ -100,6 +102,19 @@ class GenesisRuntime:
             "grasped": [self.held_item_name] if self.held_item_name else [],
         }
 
+    def open_gripper(self) -> None:
+        """Command gripper DOFs to the fully-open position (0 rad for Robotiq 2F-85).
+
+        Uses set_dofs_position for an instant position override so the open state
+        is reflected immediately in the physics snapshot and in the viewer.
+        """
+        gripper_dofs = self.bundle.gripper_dofs
+        if len(gripper_dofs) == 0:
+            return
+        open_qpos = np.zeros(len(gripper_dofs), dtype=float)
+        self.robot.set_dofs_position(open_qpos, dofs_idx_local=gripper_dofs)
+        self.robot.control_dofs_position(open_qpos, dofs_idx_local=gripper_dofs)
+
     def reset(self) -> None:
         """Reset physics to home state and clear gripper constraints.
 
@@ -116,3 +131,4 @@ class GenesisRuntime:
             self._weld_pair = None
         self.held_item_name = None
         self.scene.reset()
+        self.open_gripper()

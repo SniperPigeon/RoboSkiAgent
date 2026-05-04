@@ -19,6 +19,9 @@ WALL_T = 0.01
 TRAY_POS = (0.80, 0.22, TABLE_H)
 ASSY_POS = (0.80, -0.22, TABLE_H)
 TCP_LINK_NAME = "wrist_3_link"
+# Vertical distance from wrist_3_link (TCP) to Robotiq 2F-85 finger contact surface.
+# Tune this value if the gripper visually over- or under-shoots the part during pick.
+TCP_OFFSET_Z = 0.172
 
 _GENESIS_INITIALIZED = False
 
@@ -92,23 +95,31 @@ def _build_targets() -> dict[str, SceneTarget]:
     tx, ty = TRAY_POS[0], TRAY_POS[1]
     ax, ay = ASSY_POS[0], ASSY_POS[1]
 
-    pick_z = {
-        "A": TABLE_H + WALL_T + 0.06,
-        "B": TABLE_H + WALL_T + 0.05,
-        "C": TABLE_H + WALL_T + 0.04,
+    # Finger-contact heights = centre of each part geometry (world Z).
+    # Part A — Cylinder(height=0.06): centre at +0.030 above part_base
+    # Part B — Box(z=0.050):          centre at +0.025 above part_base
+    # Part C — Box(z=0.040):          centre at +0.020 above part_base
+    _part_base_z = TABLE_H + WALL_T + 0.001  # bottom face of resting parts
+    finger_z = {
+        "A": _part_base_z + 0.030,
+        "B": _part_base_z + 0.025,
+        "C": _part_base_z + 0.020,
     }
-    clearance = 0.05
-    approach_clearance = 0.14
+    # TCP (wrist_3_link) must be TCP_OFFSET_Z above the desired finger-contact height.
+    def _tcp(fz: float) -> float:
+        return fz + TCP_OFFSET_Z
+
+    approach_clearance = 0.14  # wrist lifts this far above pick TCP before transiting
 
     pick_positions = {
-        "PartA": (tx - 0.06, ty + 0.05, pick_z["A"] + clearance),
-        "PartB": (tx + 0.06, ty + 0.05, pick_z["B"] + clearance),
-        "PartC": (tx, ty - 0.05, pick_z["C"] + clearance),
+        "PartA": (tx - 0.06, ty + 0.05, _tcp(finger_z["A"])),
+        "PartB": (tx + 0.06, ty + 0.05, _tcp(finger_z["B"])),
+        "PartC": (tx, ty - 0.05, _tcp(finger_z["C"])),
     }
     place_positions = {
-        "AssemblySlot_1": (ax - 0.06, ay + 0.05, pick_z["A"] + clearance),
-        "AssemblySlot_2": (ax + 0.06, ay + 0.05, pick_z["B"] + clearance),
-        "AssemblySlot_3": (ax, ay - 0.05, pick_z["C"] + clearance),
+        "AssemblySlot_1": (ax - 0.06, ay + 0.05, _tcp(finger_z["A"])),
+        "AssemblySlot_2": (ax + 0.06, ay + 0.05, _tcp(finger_z["B"])),
+        "AssemblySlot_3": (ax, ay - 0.05, _tcp(finger_z["C"])),
     }
 
     targets: dict[str, SceneTarget] = {

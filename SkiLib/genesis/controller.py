@@ -83,11 +83,15 @@ class GenesisController:
         """
         self._thread_id = threading.get_ident()
         arm_dofs = self.runtime.bundle.arm_dofs
+        gripper_dofs = self.runtime.bundle.gripper_dofs
         # Fixed hold target: home initially, updated to the robot's final position
         # after each task.  Using a fixed target (not current qpos) gives the PD
         # controller a real restoring force against gravity; tracking current qpos
         # zeroes the position error every step and causes the arm to slowly droop.
         hold_qpos = self.runtime.bundle.home_qpos[arm_dofs].copy()
+        # Gripper starts and stays open (all-zero = open for Robotiq 2F-85).
+        # Without active control the gripper closes under gravity/spring forces.
+        hold_gripper_qpos = self.runtime.bundle.home_qpos[gripper_dofs].copy()
 
         while not self._stopped.is_set():
             try:
@@ -97,19 +101,26 @@ class GenesisController:
                     fut.set_result(result)
                 except Exception as exc:
                     fut.set_exception(exc)
-                # After a task, hold wherever the arm ended up.
+                # After a task, hold wherever the arm and gripper ended up.
                 try:
-                    hold_qpos = np.asarray(
+                    all_qpos = np.asarray(
                         self.runtime.robot.get_qpos().tolist(), dtype=float
-                    )[arm_dofs].copy()
+                    )
+                    hold_qpos = all_qpos[arm_dofs].copy()
+                    if len(gripper_dofs) > 0:
+                        hold_gripper_qpos = all_qpos[gripper_dofs].copy()
                 except Exception:
                     pass
             except queue.Empty:
-                # No pending work — actively hold the last commanded position.
+                # No pending work — actively hold arm and gripper positions.
                 try:
                     self.runtime.robot.control_dofs_position(
                         hold_qpos, dofs_idx_local=arm_dofs
                     )
+                    if len(gripper_dofs) > 0:
+                        self.runtime.robot.control_dofs_position(
+                            hold_gripper_qpos, dofs_idx_local=gripper_dofs
+                        )
                     self.runtime.scene.step()
                 except Exception:
                     pass

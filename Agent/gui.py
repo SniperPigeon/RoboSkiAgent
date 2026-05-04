@@ -270,12 +270,22 @@ def launch_gui(
                 show_label=False,
                 scale=4,
             )
-            start_btn = gr.Button("Start", variant="primary", scale=1)
+            start_btn  = gr.Button("Start",             variant="primary",    scale=1)
+            reset_btn  = gr.Button("Reset Environment", variant="secondary",  scale=1)
+
+        reset_status = gr.Textbox(label="Reset Status", interactive=False, visible=False)
 
         all_outputs = [log_box, session_state] + buttons
 
         start_btn.click(fn=start_flow,   inputs=[prompt_box, session_state], outputs=all_outputs)
         prompt_box.submit(fn=start_flow, inputs=[prompt_box, session_state], outputs=all_outputs)
+
+        def _reset_env():
+            from SkiLib.sim_env import reset_station
+            reset_station()
+            return gr.update(value="Environment reset to home state.", visible=True)
+
+        reset_btn.click(fn=_reset_env, inputs=[], outputs=[reset_status])
 
         for btn in buttons:
             btn.click(fn=handle_choice, inputs=[btn, feedback_box, session_state], outputs=all_outputs)
