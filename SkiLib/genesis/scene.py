@@ -137,7 +137,14 @@ def _build_targets() -> dict[str, SceneTarget]:
 def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/roboski-matplotlib")
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp/roboski-cache")
-    os.environ.setdefault("NUMBA_DISABLE_JIT", os.getenv("ROBOSKI_NUMBA_DISABLE_JIT", "1"))
+    # pyrender's jit_render uses address_to_ptr() which is a JIT-only intrinsic;
+    # NUMBA_DISABLE_JIT=1 crashes the viewer.  When show_viewer=True, force JIT on
+    # regardless of what the env already has (must be set before numba is imported).
+    # Headless/CI runs default to JIT-off for faster startup.
+    if show_viewer:
+        os.environ["NUMBA_DISABLE_JIT"] = os.getenv("ROBOSKI_NUMBA_DISABLE_JIT", "0")
+    else:
+        os.environ.setdefault("NUMBA_DISABLE_JIT", os.getenv("ROBOSKI_NUMBA_DISABLE_JIT", "1"))
 
     import genesis as gs  # noqa: PLC0415
 
@@ -201,6 +208,9 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
         np.array([330] * 6 + [50] * max(0, int(robot.n_dofs) - 6)),
     )
     robot.set_dofs_position(home_qpos[: int(robot.n_dofs)])
+    # Register the home configuration as the reset target.  scene.build() captures
+    # _init_state before set_dofs_position() runs, so we overwrite it here.
+    scene.reset(scene.get_state())
 
     return GenesisSceneBundle(
         scene=scene,

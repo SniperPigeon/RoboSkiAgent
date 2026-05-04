@@ -83,6 +83,11 @@ class GenesisController:
         """
         self._thread_id = threading.get_ident()
         arm_dofs = self.runtime.bundle.arm_dofs
+        # Fixed hold target: home initially, updated to the robot's final position
+        # after each task.  Using a fixed target (not current qpos) gives the PD
+        # controller a real restoring force against gravity; tracking current qpos
+        # zeroes the position error every step and causes the arm to slowly droop.
+        hold_qpos = self.runtime.bundle.home_qpos[arm_dofs].copy()
 
         while not self._stopped.is_set():
             try:
@@ -92,12 +97,18 @@ class GenesisController:
                     fut.set_result(result)
                 except Exception as exc:
                     fut.set_exception(exc)
-            except queue.Empty:
-                # No pending work — hold robot position to keep the viewer alive.
+                # After a task, hold wherever the arm ended up.
                 try:
-                    cur = np.asarray(self.runtime.robot.get_qpos().tolist(), dtype=float)
+                    hold_qpos = np.asarray(
+                        self.runtime.robot.get_qpos().tolist(), dtype=float
+                    )[arm_dofs].copy()
+                except Exception:
+                    pass
+            except queue.Empty:
+                # No pending work — actively hold the last commanded position.
+                try:
                     self.runtime.robot.control_dofs_position(
-                        cur[arm_dofs], dofs_idx_local=arm_dofs
+                        hold_qpos, dofs_idx_local=arm_dofs
                     )
                     self.runtime.scene.step()
                 except Exception:
