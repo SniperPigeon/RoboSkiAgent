@@ -32,7 +32,21 @@ def setup_robot_env(debug_skip_check: bool | None = None) -> RobotContext:
 
 
 def reset_station() -> None:
-    """Reset the Genesis simulation by rebuilding the RobotContext singleton."""
-    RobotContext._instance = None
-    RobotContext()
-    logger.info("[sim_env] Genesis scene reset completed.")
+    """Reset the Genesis simulation to home state for repeated experiments.
+
+    Submits GenesisRuntime.reset() to the Genesis thread (via controller if
+    present) so scene.step() serialisation is respected.  After the reset,
+    GenesisController.run() automatically updates its hold_qpos from the
+    post-reset robot position (home_qpos), so the arm stays at home.
+    """
+    ctx = RobotContext.instance()
+    if ctx is None:
+        logger.warning("[sim_env] reset_station: RobotContext not initialised, skipping.")
+        return
+    runtime = ctx.runtime
+    ctrl = getattr(runtime, "controller", None)
+    if ctrl is not None:
+        ctrl.submit(runtime.reset)
+    else:
+        runtime.reset()
+    logger.info("[sim_env] Genesis scene reset to home state.")

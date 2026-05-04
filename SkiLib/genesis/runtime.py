@@ -99,3 +99,20 @@ class GenesisRuntime:
             "active_tool": "Robotiq_2F_85",
             "grasped": [self.held_item_name] if self.held_item_name else [],
         }
+
+    def reset(self) -> None:
+        """Reset physics to home state and clear gripper constraints.
+
+        Must be called from the Genesis thread (via GenesisController.submit).
+        scene.reset() restores all rigid-body positions/velocities to the
+        snapshot taken at the end of build_genesis_scene() — robot at home_qpos,
+        all parts at their tray/assembly positions, no weld constraints.
+        """
+        if self._weld_pair is not None:
+            try:
+                self.rigid_solver.delete_weld_constraint(*self._weld_pair)
+            except Exception:
+                pass
+            self._weld_pair = None
+        self.held_item_name = None
+        self.scene.reset()
