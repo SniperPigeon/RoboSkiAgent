@@ -1,123 +1,135 @@
 """
-Genesis assembly scene: UR16e + Robotiq 2F-85 + primitive workpiece objects.
-Assembly context: pick parts from parts tray, place into assembly tray.
+Genesis gear assembly scene: IndustRealKit gear set on gear base.
+Planning task: pick gears from staging area and place onto base shafts in order.
 
-Named targets (symbolic, for RobotContext integration):
-  PartA_Pick, PartB_Pick, PartC_Pick   — pick locations above each part
-  AssemblySlot_1/2/3                   — place locations in assembly tray
+Ordering constraint (tests Planner):
+  gear_base already fixed → Gear_Small → Gear_Medium → Gear_Large
+  Each gear must be placed before the next can be loaded (spatial dependency).
+
+Assets (IndustRealKit, meters, no scale needed):
+  gear_base:   150×75×25 mm, z_min=0 (sits flush on table)
+  gear_small:  ⌀22mm × 25mm thick, disc in XZ plane, z_min=-11mm
+  gear_medium: ⌀42mm × 25mm thick, disc in XZ plane, z_min=-21mm
+  gear_large:  ⌀62mm × 25mm thick, disc in XZ plane, z_min=-31mm
 
 Run with: conda run -n rsagent python res/genesis_scene_test.py
 """
 from pathlib import Path
 import numpy as np
 import genesis as gs
-
 import platform, os
-if platform.system() == "Darwin":
-    # Force Cocoa app activation so pyglet window survives
-    os.environ.setdefault("PYOBJUS_MACOS_APPKIT_THREAD_CHECK", "0")
-    
-RES = Path(__file__).parent
 
-gs.init(backend=gs.cpu, logging_level="warning")
+if platform.system() == "Darwin":
+    os.environ.setdefault("PYOBJUS_MACOS_APPKIT_THREAD_CHECK", "0")
+
+RES   = Path(__file__).parent
+GEARS = RES / "industrealkit/gears/stl"
+
+gs.init(logging_level="warning")
 
 scene = gs.Scene(
     show_viewer=True,
     viewer_options=gs.options.ViewerOptions(
         res=(1280, 720),
-        camera_pos=(0.0, -1.8, 1.8),
-        camera_lookat=(0.8, 0.0, 0.9),
+        camera_pos=(0.5, -1.6, 1.6),
+        camera_lookat=(0.78, 0.0, 0.85),
     ),
 )
 
-# ── Ground ───────────────────────────────────────────────────────────────────
+# ── Ground + table ────────────────────────────────────────────────────────────
+TABLE_H = 0.72
 scene.add_entity(gs.morphs.Plane())
-
-# ── Work table ───────────────────────────────────────────────────────────────
-TABLE_H  = 0.72
-TABLE_CX = 0.7    # centre x; table spans x = 0.2 ~ 1.2
 scene.add_entity(
-    gs.morphs.Box(size=(1.0, 0.8, TABLE_H), fixed=True, pos=(TABLE_CX, 0.0, TABLE_H / 2)),
+    gs.morphs.Box(size=(1.0, 0.8, TABLE_H), fixed=True, pos=(0.7, 0.0, TABLE_H / 2)),
     surface=gs.surfaces.Default(color=(0.85, 0.75, 0.6, 1.0)),
 )
 
-# ── Robot (UR16e + Robotiq 2F-85) — mounted on table top ─────────────────────
-# Robot sits at the left-centre of the table; trays are in front / to the right
-ROBOT_X = 0.35   # near the left edge of the table (x=0.2 + 0.15 margin)
+# ── Robot ─────────────────────────────────────────────────────────────────────
 robot = scene.add_entity(
-    gs.morphs.URDF(
-        file=str(RES / "ur16e_robotiq.urdf"),
+    gs.morphs.URDF(file=str(RES / "ur16e_robotiq.urdf"), fixed=True, pos=(0.35, 0.0, TABLE_H)),
+)
+
+# ── Gear base (fixed, assembly target platform) ───────────────────────────────
+# 150×75×25mm plate, origin at centre of bottom face, z_min=0 → sits on table.
+# Placed slightly right of robot reach centre; gears go on top of this.
+BASE_X, BASE_Y = 0.78, 0.0
+scene.add_entity(
+    gs.morphs.Mesh(
+        file=str(GEARS / "gear_base.stl"),
         fixed=True,
-        pos=(ROBOT_X, 0.0, TABLE_H),
+        pos=(BASE_X, BASE_Y, TABLE_H),
     ),
+    surface=gs.surfaces.Default(color=(0.30, 0.40, 0.60, 1.0)),
 )
 
-# ── Parts tray (left side of table) ──────────────────────────────────────────
-# Thin-walled tray: outer box minus interior. Approximated as 4 wall strips + base.
-TRAY_X, TRAY_Y = 0.35, 0.32    # tray footprint
-TRAY_H = 0.04                   # wall height
-WALL_T = 0.01
-TRAY_POS = (0.5, 0.22, TABLE_H)  # tray origin (bottom face)
+# Shaft target positions on the base (evenly spaced along x, top of 25mm plate).
+# These are approximate — tune after visual confirmation of shaft locations.
+BASE_TOP_Z = TABLE_H + 0.025
+SHAFT_XS   = [BASE_X - 0.040, BASE_X, BASE_X + 0.040]   # small, medium, large
 
-def add_tray(scene, cx, cy, cz, w, d, h, t, color):
-    """Add a simple open-top tray as 5 boxes (base + 4 walls)."""
-    base_z = cz + t / 2
-    scene.add_entity(gs.morphs.Box(size=(w, d, t),       fixed=True, pos=(cx, cy, base_z)),       surface=gs.surfaces.Default(color=color))
-    scene.add_entity(gs.morphs.Box(size=(t, d, h),       fixed=True, pos=(cx - w/2 + t/2, cy, cz + h/2)), surface=gs.surfaces.Default(color=color))
-    scene.add_entity(gs.morphs.Box(size=(t, d, h),       fixed=True, pos=(cx + w/2 - t/2, cy, cz + h/2)), surface=gs.surfaces.Default(color=color))
-    scene.add_entity(gs.morphs.Box(size=(w, t, h),       fixed=True, pos=(cx, cy - d/2 + t/2, cz + h/2)), surface=gs.surfaces.Default(color=color))
-    scene.add_entity(gs.morphs.Box(size=(w, t, h),       fixed=True, pos=(cx, cy + d/2 - t/2, cz + h/2)), surface=gs.surfaces.Default(color=color))
+# ── Staging area: gears waiting to be picked (y+ side, spread along x) ────────
+# Gears have their disc in XZ plane; z_min = -radius, z_max = +radius.
+# Place z = TABLE_H + radius so the bottom of the disc rests on the table.
+STAGE_Y = 0.28   # staging row y-coordinate
 
-# Parts tray — in front of robot (right side of table), assembly tray further right
-TRAY_POS  = (0.80,  0.22, TABLE_H)
-ASSY_POS  = (0.80, -0.22, TABLE_H)
-add_tray(scene, *TRAY_POS, TRAY_X, TRAY_Y, TRAY_H, WALL_T, color=(0.7, 0.7, 0.75, 1.0))
+# Rotate -90° around X so disc lies flat (XY plane) like a hockey puck.
+# After rotation: original y-thickness [0, 25mm] maps to z [0, 25mm], z_min=0.
+GEAR_THICKNESS = 0.025   # 25 mm, same for all three gears
 
-# Assembly tray (right side) — darker
-add_tray(scene, *ASSY_POS, TRAY_X, TRAY_Y, TRAY_H, WALL_T, color=(0.4, 0.5, 0.6, 1.0))
+# With euler=(-90,0,0): original y:[0,25mm] maps to z:[-25,0]mm → z_min=-25mm.
+# Lift by GEAR_THICKNESS so the bottom face sits flush on the table.
+def add_gear(path, color, stage_x):
+    scene.add_entity(
+        gs.morphs.Mesh(
+            file=str(path),
+            pos=(stage_x, STAGE_Y, TABLE_H + GEAR_THICKNESS),
+            euler=(-90, 0, 0),
+        ),
+        surface=gs.surfaces.Default(color=color),
+    )
+    return stage_x, STAGE_Y
 
-# ── Parts (A=red cylinder, B=green box, C=blue box) ──────────────────────────
-PART_Z = TABLE_H + WALL_T + 0.001   # sitting on tray base
-TX, TY = TRAY_POS[0], TRAY_POS[1]  # tray centre
+g_small_cx,  g_small_cy  = add_gear(GEARS/"gear_small.stl",  (0.90, 0.75, 0.20, 1.0), 0.62)
+g_medium_cx, g_medium_cy = add_gear(GEARS/"gear_medium.stl", (0.85, 0.50, 0.15, 1.0), 0.78)
+g_large_cx,  g_large_cy  = add_gear(GEARS/"gear_large.stl",  (0.75, 0.25, 0.15, 1.0), 0.94)
 
-# Part A — cylinder Ø50mm × 60mm
-part_a = scene.add_entity(
-    gs.morphs.Cylinder(radius=0.025, height=0.06, pos=(TX - 0.06, TY + 0.05, PART_Z + 0.030)),
-    surface=gs.surfaces.Default(color=(0.9, 0.2, 0.2, 1.0)),
-)
+GEAR_TOP_Z = TABLE_H + GEAR_THICKNESS   # z=0 after lift = bottom face on table, top = TABLE_H+0.025
 
-# Part B — box 50×40×50mm
-part_b = scene.add_entity(
-    gs.morphs.Box(size=(0.050, 0.040, 0.050), pos=(TX + 0.06, TY + 0.05, PART_Z + 0.025)),
-    surface=gs.surfaces.Default(color=(0.2, 0.8, 0.3, 1.0)),
-)
+# ── Named target registry ─────────────────────────────────────────────────────
+# Pick targets: TCP just above gear top-of-disc.
+# Place targets: TCP just above each shaft slot on the base.
+# Approach: 140mm above pick/place point (existing scene.py convention).
+APPR = 0.14
 
-# Part C — box 60×60×40mm
-part_c = scene.add_entity(
-    gs.morphs.Box(size=(0.060, 0.060, 0.040), pos=(TX, TY - 0.05, PART_Z + 0.020)),
-    surface=gs.surfaces.Default(color=(0.2, 0.4, 0.9, 1.0)),
-)
+def pick_targets(cx, cy, label):
+    return {
+        f"{label}_Approach": (cx, cy, GEAR_TOP_Z + APPR),
+        f"{label}_Pick":     (cx, cy, GEAR_TOP_Z + 0.010),
+    }
 
-# ── Named target registry (symbolic → world xyz) ─────────────────────────────
-# These will feed into RobotContext when integrating with Agent/
-AX, AY = ASSY_POS[0], ASSY_POS[1]
-NAMED_TARGETS = {
-    "PartA_Pick":     (TX - 0.06, TY + 0.05, TABLE_H + WALL_T + 0.06 + 0.05),
-    "PartB_Pick":     (TX + 0.06, TY + 0.05, TABLE_H + WALL_T + 0.05 + 0.05),
-    "PartC_Pick":     (TX,        TY - 0.05, TABLE_H + WALL_T + 0.04 + 0.05),
-    "AssemblySlot_1": (AX - 0.06, AY + 0.05, TABLE_H + WALL_T + 0.06 + 0.05),
-    "AssemblySlot_2": (AX + 0.06, AY + 0.05, TABLE_H + WALL_T + 0.05 + 0.05),
-    "AssemblySlot_3": (AX,        AY - 0.05, TABLE_H + WALL_T + 0.04 + 0.05),
-}
+def place_targets(shaft_x, label):
+    return {
+        f"{label}_Approach": (shaft_x, BASE_Y, BASE_TOP_Z + APPR),
+        f"{label}_Place":    (shaft_x, BASE_Y, BASE_TOP_Z + 0.010),
+    }
+
+NAMED_TARGETS = {}
+NAMED_TARGETS.update(pick_targets(g_small_cx,  g_small_cy,  "GearSmall"))
+NAMED_TARGETS.update(pick_targets(g_medium_cx, g_medium_cy, "GearMedium"))
+NAMED_TARGETS.update(pick_targets(g_large_cx,  g_large_cy,  "GearLarge"))
+NAMED_TARGETS.update(place_targets(SHAFT_XS[0], "ShaftSlot_Small"))
+NAMED_TARGETS.update(place_targets(SHAFT_XS[1], "ShaftSlot_Medium"))
+NAMED_TARGETS.update(place_targets(SHAFT_XS[2], "ShaftSlot_Large"))
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 scene.build()
 
 print(f"Robot DOFs : {robot.n_dofs}")
-print(f"Joints     : {[j.name for j in robot.joints]}")
-print(f"Named targets: {list(NAMED_TARGETS.keys())}")
+print(f"Named targets:")
+for name, pos in NAMED_TARGETS.items():
+    print(f"  {name}: {tuple(round(v, 4) for v in pos)}")
 
-# ── PD control — hold home position ──────────────────────────────────────────
+# ── PD control — hold home ────────────────────────────────────────────────────
 arm_home  = np.array([0, -np.pi/2, np.pi/2, -np.pi/2, -np.pi/2, 0], dtype=float)
 grip_home = np.zeros(max(0, int(robot.n_dofs) - 6))
 home_qpos = np.concatenate([arm_home, grip_home])
@@ -130,7 +142,7 @@ robot.set_dofs_force_range(
 )
 robot.set_dofs_position(home_qpos)
 
-print("\nHolding home position. Ctrl+C to exit.")
+print("\nHolding home. Ctrl+C to exit.")
 try:
     while True:
         robot.control_dofs_position(home_qpos)
