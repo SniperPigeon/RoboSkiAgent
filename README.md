@@ -1,54 +1,64 @@
 # RoboSkiAgent
 
-Accepts natural-language assembly instructions and drives an industrial robot through a multi-agent LangGraph state machine — with mandatory human-in-the-loop gates at every decision boundary.
+RoboSkiAgent accepts natural-language assembly instructions and drives a simulated industrial robot through a LangGraph state machine. The current execution backend is **Genesis**, with mandatory human-in-the-loop gates at plan review, manual tasks, and failure recovery.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    U(["👤 Operator"])
-    U -->|"Natural language\ninstruction"| AG
+    U(["Operator"])
+    U -->|"natural-language instruction"| AG
 
     subgraph AG["Agent Layer · LangGraph"]
         direction TB
-        S["🔍 Supervisor"] --> P["📋 Planner"]
-        P --> PR["⏸ Plan Review"]
-        PR --> D["⚙️ Dispatcher"]
-        D -->|auto| E["🤖 Executor"]
-        D -->|manual| MH["⏸ Manual Handler"]
-        E -->|failure| HH["⏸ HITL Handler"]
+        S["Supervisor"] --> P["Planner"]
+        P --> PR["Plan Review"]
+        PR --> D["Dispatcher"]
+        D -->|auto| E["Executor"]
+        D -->|manual| MH["Manual Handler"]
+        E -->|failure| HH["HITL Handler"]
     end
 
     AG -->|"skill.try_execute()"| SL["SkiLib\nPickAndPlace · MoveJ/L · Grasp/Release"]
-    SL -->|"RoboDK API"| R(["🤖 RoboDK"])
+    SL -->|"symbol resolution"| RT["GenesisRuntime\nscene + objects + targets"]
+    RT -->|"scene.step()"| GS(["Genesis Physics Engine"])
     U <-.->|"approve / retry / replan"| PR & MH & HH
 ```
 
 **Two-layer design:**
-- **Layer 1 (Planning):** Supervisor queries the RoboDK scene (symbols only, no coordinates), Planner builds a `todo_list` via tool calls.
-- **Layer 2 (Execution):** Dispatcher slots tasks, Executor runs skills; failures trigger an LLM recovery loop, then escalate to human if unresolved.
+
+- **Planning:** Supervisor queries Genesis scene symbols only: targets, objects, tools, and gripper state. Planner builds a `todo_list` through skill-specific tool calls.
+- **Execution:** Dispatcher slots one task at a time. Executor calls SkiLib skills, which resolve symbolic names into Genesis targets/objects and return structured `SkillResult` values.
 
 ## Directory Structure
 
-```
+```text
 RoboSkiAgent/
-├── Agent/                  # Orchestration layer (LangGraph)
-│   ├── graph.py            # build_graph() — state machine assembly
-│   ├── state.py            # GlobalState TypedDict
-│   ├── llm.py              # LLM factory (claude / ollama)
-│   ├── gui.py              # Gradio UI — full interrupt support ✅
-│   ├── __main__.py         # CLI entry — no interrupt support ⚠️
-│   ├── prompts/            # supervisor.txt / planner.txt / executor.txt
-│   └── nodes/              # supervisor, planner, plan_review, dispatcher,
-│                           #   executor, manual_handler, hitl_handler
-└── SkiLib/                 # Skill library (no LangGraph dependency)
-    ├── base.py             # BasePrimitive / BaseSkill / SkillResult
-    ├── registry.py         # SkillRegistry singleton (auto-scans skills/)
-    ├── robotcontext.py     # RoboDK connection singleton
-    ├── log.py              # get_logger() factory
-    ├── metatools/          # T-skills: read-only scene queries for Supervisor
-    ├── primitives/         # MoveJ, MoveL, Grasp, Release
-    └── skills/             # PickAndPlace (8-step sequence)
+├── Agent/                       # LangGraph orchestration layer
+│   ├── graph.py                 # build_graph() state machine assembly
+│   ├── graph_v2.py              # current V2 graph entry used by CLI/GUI paths
+│   ├── state.py                 # GlobalState TypedDict
+│   ├── llm.py                   # LLM factory: claude / ollama
+│   ├── gui.py                   # Gradio UI with interrupt support and Genesis viewer mode
+│   ├── __main__.py              # CLI entry; HITL interrupt flow is limited
+│   ├── prompts/                 # supervisor / planner / executor prompts
+│   └── nodes/                   # supervisor, planner, plan_review, dispatcher,
+│                                # executor, manual_handler, hitl_handler
+├── SkiLib/                      # Skill library; no LangGraph dependency
+│   ├── base.py                  # BasePrimitive / BaseSkill / SkillResult
+│   ├── registry.py              # SkillRegistry singleton
+│   ├── robotcontext.py          # Genesis runtime facade, preserves old class name
+│   ├── genesis/                 # Genesis scene/runtime/controller helpers
+│   │   ├── scene.py             # UR16e + Robotiq + tray/object/target scene builder
+│   │   ├── runtime.py           # GenesisRuntime scene and symbolic registries
+│   │   ├── motion.py            # IK and PD control helpers
+│   │   ├── controller.py        # macOS/viewer thread serializer
+│   │   └── types.py             # SceneTarget / SceneObject / TargetPose
+│   ├── metatools/               # read-only scene tools for Supervisor
+│   ├── primitives/              # Genesis MoveJ, MoveL, Grasp, Release
+│   └── skills/                  # PickAndPlace
+├── res/                         # URDF, STL assets, Genesis scene experiments
+└── tests/                       # benchmark and Genesis smoke tests
 ```
 
 ## Tech Stack
@@ -57,35 +67,62 @@ RoboSkiAgent/
 |-----------|--------|
 | Agent orchestration | LangGraph (`StateGraph`) |
 | LLM framework | LangChain Core |
-| LLM (default) | Claude (`claude-sonnet-4-6`) |
-| LLM (local) | Ollama (`ChatOllama`) |
-| Robot simulation | RoboDK |
+| LLM providers | Claude via Anthropic, or local Ollama |
+| Robot simulation | Genesis (`genesis-world`) |
+| Robot model | UR16e + Robotiq 2F-85 URDF |
 | UI | Gradio |
 | Language | Python 3.11+ |
 
 ## Prerequisites
 
 - Python 3.11+
-- [RoboDK](https://robodk.com/download) installed and running
+- A virtual environment or conda environment
 - Anthropic API key **or** a local Ollama instance
+- Genesis dependencies supported by your platform
+
+RoboDK is no longer the active execution backend. Any remaining RoboDK dependency or documentation is legacy/reference material unless explicitly marked otherwise.
 
 ## Installation
 
 ```bash
-# 1. Clone and enter the repo
 git clone <repo-url>
 cd RoboSkiAgent
 
-# 2. Create and activate a virtual environment
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
 source .venv/bin/activate
 
-# 3. Install dependencies
 pip install -r requirements.txt
 ```
+
+On Windows, activate with:
+
+```bash
+.venv\Scripts\activate
+```
+
+### Scene Assets: IndustRealKit
+
+The `res/industrealkit/` directory contains only Git LFS pointer files in this repository. The actual STL/OBJ meshes (gears, pegs, hole plates) are stored in the upstream IndustRealKit repository and must be fetched separately.
+
+```bash
+# Install Git LFS if not already present
+# Ubuntu/Debian:
+sudo apt install git-lfs
+# Conda:
+conda install -c conda-forge git-lfs
+
+# Clone IndustRealKit and pull LFS assets
+git clone https://github.com/NVlabs/industrealkit.git /tmp/industrealkit
+cd /tmp/industrealkit
+git lfs install
+git lfs pull
+
+# Copy mesh folders into res/
+cp -r /tmp/industrealkit/gears         <repo-root>/res/industrealkit/
+cp -r /tmp/industrealkit/pegs_and_holes <repo-root>/res/industrealkit/
+```
+
+The genesis scene scripts (e.g. `res/genesis_scene_test.py`) and `SkiLib/genesis/scene.py` expect assets at `res/industrealkit/gears/stl/` and `res/industrealkit/pegs_and_holes/stl/`. Without them, scene builds will fail silently (meshes load as empty geometry).
 
 ## Configuration
 
@@ -95,12 +132,16 @@ Copy the example env file and fill in your keys:
 cp .env.example .env
 ```
 
-Minimum required fields in `.env`:
+Minimum useful fields:
 
 ```env
-# LLM provider: "claude" (default) or "ollama"
+# LLM provider: "claude" or "ollama"
 ROBOSKI_LLM_PROVIDER=claude
 ANTHROPIC_API_KEY=sk-ant-...
+
+# Genesis runtime
+ROBOSKI_GENESIS_VIEWER=0
+ROBOSKI_GENESIS_BACKEND=cpu
 
 # For local Ollama:
 # ROBOSKI_LLM_PROVIDER=ollama
@@ -114,29 +155,79 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ## Usage
 
-### GUI (recommended — full interrupt support)
+### GUI, headless Genesis
 
 ```bash
 python -m Agent.gui
 ```
 
-Opens a Gradio interface at `http://localhost:7860`. Type an assembly instruction and interact with all human-in-the-loop gates (plan review, manual tasks, failure recovery).
+This starts the Gradio interface at `http://localhost:7860`. Use this path for end-to-end runs with plan review and recovery interrupts.
 
-### CLI (limited)
-
-```bash
-python -m Agent "Put first part A to target, then place B on it."
-```
-
-> **⚠️ CLI limitation:** The CLI uses `graph.invoke()` which raises `NodeInterrupt` when the graph hits any `interrupt()` node (`plan_review`, `hitl_handler`, `manual_intervention_handler`). Until a streaming + resume loop is implemented in `__main__.py`, **the CLI cannot complete flows that require human approval**. Use the GUI for end-to-end runs.
-
-Add `--skip-check` to bypass IK/collision pre-checks in simulation:
+### GUI with Genesis viewer
 
 ```bash
-python -m Agent "Put first part A to target, then place B on it." --skip-check
+ROBOSKI_GENESIS_VIEWER=1 python -m Agent.gui
 ```
+
+Viewer mode uses `GenesisController` to serialize `scene.step()` calls onto the Genesis thread and keep the robot holding position while the UI is idle.
+
+### CLI, limited HITL support
+
+```bash
+python -m Agent "Pick Part_A_1 from PartA_Pick and place it at AssemblySlot_1."
+```
+
+The CLI still uses a non-interactive graph invocation path. It can hit `NodeInterrupt` at plan review or recovery gates, so the GUI remains the recommended path for full human-in-the-loop flows.
+
+### Skip pre-checks for debugging
+
+```bash
+python -m Agent "Pick Part_A_1 and place it at AssemblySlot_1." --skip-check
+```
+
+`--skip-check` bypasses planning-time IK/reachability checks. It does not add collision checking.
+
+## Current Scene Symbols
+
+Core objects:
+
+```text
+Part_A_1
+Part_B_1
+Part_C_1
+```
+
+Core targets:
+
+```text
+Home_position
+PartA_Approach, PartA_Pick
+PartB_Approach, PartB_Pick
+PartC_Approach, PartC_Pick
+AssemblySlot_1_Approach, AssemblySlot_1
+AssemblySlot_2_Approach, AssemblySlot_2
+AssemblySlot_3_Approach, AssemblySlot_3
+```
+
+## Current Limitations
+
+- `PickAndPlace` is the only production skill.
+- `MoveL` uses fixed waypoint sampling and has no adaptive step size or singularity handling.
+- Collision checking is not equivalent to RoboDK `MoveJ_Test` / `MoveL_Test`; current checks are mainly IK and timeout based.
+- `Grasp` / `Release` use a Genesis weld constraint to represent attachment, not contact-rich physical grasping.
+- Dynamic tracking, such as conveyor following, is not implemented.
+- CLI interrupt resume is not complete; use the GUI for HITL workflows.
 
 ## Logging
 
-Logs are written to both the console and `logs/roboski.log` (rotating, 10 MB × 5 files).
-Control verbosity via `ROBOSKI_LOG_LEVEL` (default: `INFO`).
+Logs are written to the console and `logs/roboski.log` with rotation.
+
+```env
+ROBOSKI_LOG_LEVEL=INFO
+```
+
+## More Documentation
+
+- `SkiLib/ARCHITECTURE.md` describes the current Genesis architecture.
+- `GENESIS_MIGRATION_PLAN.md` records the migration phases, completed work, deviations, and remaining risks.
+- `ROADMAP.md` summarizes strengths, limitations, and next development priorities.

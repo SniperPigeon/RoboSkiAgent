@@ -20,5 +20,4 @@ robodk
 langgraph
 langgraph-cli[inmem]
 langgraph-sdk
-langchain-community
-llama-cpp-python
+genesis-world

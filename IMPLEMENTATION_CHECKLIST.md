@@ -1,7 +1,29 @@
 # RoboSkiAgent 实现 Checklist
 
 > 按依赖顺序排列。每阶段完成后再进入下一阶段。
-> 最后更新：2026-03-30（Phase 6 迁移完成：Agent/ 包生产化，CLI 入口，prompts/ 目录；CLI interrupt handling 标注为待实现）
+> 最后更新：2026-05-06（Genesis 迁移主路径完成；早期 RoboDK 条目保留为历史记录）
+
+---
+
+## 当前状态 · Genesis 迁移收尾
+
+> 下方 Phase 0-6 记录了早期 RoboDK 原型和 Agent 生产化过程。当前主后端已切换为 Genesis；新增工作应优先参考本节、`GENESIS_MIGRATION_PLAN.md` 和 `SkiLib/ARCHITECTURE.md`。
+
+- [x] **G0** 冻结 RoboDK 主路径：不再把 RoboDK 作为当前执行后端 *(2026-05-04)*
+- [x] **G1** 新增 Genesis scene/runtime/types：`SkiLib/genesis/scene.py`、`runtime.py`、`types.py` *(2026-04-28)*
+- [x] **G2** `RobotContext` 改为 Genesis runtime facade，保留类名减少上层改动 *(2026-04-28)*
+- [x] **G3** Genesis metatools 接入 Supervisor：list targets / objects / tools / gripper state *(2026-04-28)*
+- [x] **G4** Genesis motion primitives：`MoveJ` / `MoveL`，基于 IK + PD control *(2026-04-28 至 2026-05-04)*
+- [x] **G5** Genesis gripper primitives：`Grasp` / `Release`，基于 weld constraint 的 kinematic attachment *(2026-05-04)*
+- [x] **G6** `PickAndPlace` 迁移为 Genesis 10 步安全序列 *(2026-05-04)*
+- [x] **G7** `GenesisController`：viewer/macOS 下序列化 `scene.step()`，空闲 hold position *(2026-05-04)*
+- [x] **G8** `GenesisRuntime.reset()`：支持 episode 重置和后续 rollout worker 设计 *(2026-05-04)*
+- [x] **G9** Agent GUI 接入 Genesis，GUI 为当前端到端推荐入口 *(2026-05-04)*
+- [x] **G10** README / ROADMAP / CLAUDE / checklist 完成 Genesis 文档纠偏 *(2026-05-06)*
+- [ ] **G11** 依赖清理：必要时拆分 `requirements-legacy-robodk.txt`，避免新手误以为 RoboDK 仍是主依赖
+- [ ] **G12** CLI interrupt resume：`python -m Agent` 支持 stream + resume，摆脱 GUI 依赖
+- [ ] **G13** MoveL 加固：自适应 waypoint、奇异点处理、碰撞/可达性预检增强
+- [ ] **G14** 抓取物理增强：从 weld semantic attachment 走向接触/摩擦或真机夹爪反馈
 
 ---
 
@@ -54,8 +76,8 @@
 
 ---
 
-## Phase 1 · RoboDK 场景查询层
-*Supervisor 消歧义的数据来源；Agent 层所有"符号"从这里取*
+## Phase 1 · RoboDK 场景查询层（历史计划，已被 Genesis metatools 取代）
+*Supervisor 消歧义的数据来源；Agent 层所有"符号"从这里取。当前主实现见 G3 和 `SkiLib/metatools/informative.py`。*
 
 - [ ] **1.1** 新建 `SkiLib/primitives/scene_query.py`（底层 RoboDK API 封装）
   - `ListItems(item_type) -> SkillResult`：调用 `RDK.ItemList(item_type)`，返回 `data={"items": [{name, type}]}`
@@ -79,8 +101,8 @@
 
 ---
 
-## Phase 2 · 夹爪原语 + PickAndPlace 重写
-*Motion primitives 补全；PickAndPlace 与 RoboDK 树约定对齐*
+## Phase 2 · 夹爪原语 + PickAndPlace 重写（历史 RoboDK 阶段）
+*Motion primitives 补全；PickAndPlace 与 RoboDK 树约定对齐。当前 Genesis 实现见 G4-G6。*
 
 - [x] **2.1** 补全 `SkiLib/primitives/motion.py` 中的 `MoveL.check()` *(2026-03-13)*
   - 参考 `MoveJ.check()` 实现；调用 `robot.MoveL_Test(current_joints, target_pose)`
@@ -199,8 +221,8 @@
 
 ---
 
-## Phase 4 · 端到端验证与加固
-*系统联调；消除已知风险点*
+## Phase 4 · 端到端验证与加固（历史 RoboDK 阶段）
+*系统联调；消除已知风险点。当前 Genesis 端到端路径以 GUI 为准。*
 
 - [ ] **4.1** 端到端仿真测试（RoboDK 仿真模式，不连接真机）
   - 用例 1：正常指令 "将 Part_A 装入 Tray_1" → Supervisor 查树 → Planner 生成 todo_list → PickAndPlace 执行完整序列
@@ -314,15 +336,20 @@
 | `SkiLib/registry.py` | ✅ 完成 | 0.1 |
 | `SkiLib/decorators.py` | ✅ 不建（见 0.2 决策） | 0.2 |
 | `SkiLib/__init__.py` | ✅ 完成 | 0.3 |
-| `SkiLib/robotcontext.py` | ⚠️ 完成，3处 print() 待迁移 | 0.4 / 5.5 |
+| `SkiLib/robotcontext.py` | ✅ Genesis runtime facade | G2 |
 | `SkiLib/base.py` | ✅ 完成（SkillResult, TOOL_METHODS, as_tools(), require_robot_active） | — |
-| `SkiLib/primitives/motion.py` | ✅ 完成（MoveJ + MoveL，含 check()） | 2.1 |
-| `SkiLib/primitives/gripper.py` | ✅ 完成（Grasp + Release，expected_item） | 2.2 |
-| `SkiLib/skills/pick_and_place.py` | ✅ 完成（8步序列，显式接近点参数） | 2.3 |
+| `SkiLib/genesis/scene.py` | ✅ Genesis scene builder（UR16e + Robotiq + objects + targets） | G1 |
+| `SkiLib/genesis/runtime.py` | ✅ GenesisRuntime（registries + reset + gripper state） | G1 / G8 |
+| `SkiLib/genesis/controller.py` | ✅ viewer/macOS thread serializer | G7 |
+| `SkiLib/genesis/motion.py` | ✅ IK / control helpers | G4 |
+| `SkiLib/genesis/types.py` | ✅ SceneTarget / SceneObject / TargetPose | G1 |
+| `SkiLib/primitives/motion.py` | ✅ Genesis MoveJ + MoveL；待增强碰撞/奇异点检查 | G4 / G13 |
+| `SkiLib/primitives/gripper.py` | ✅ Genesis Grasp + Release；weld constraint 语义抓取 | G5 / G14 |
+| `SkiLib/skills/pick_and_place.py` | ✅ Genesis 10步序列，显式接近点参数 | G6 |
 | `SkiLib/utils.py` | ⚠️ 有 print()，待迁移 | 5.5.1 |
-| `SkiLib/primitives/scene_query.py` | ❌ 待建 | 1.1 |
-| `SkiLib/skills/task_skills.py` | ❌ 待建 | 1.2 |
-| `SkiLib/specs/example_assembly.yaml` | ❌ 待建 | 1.3 |
+| `SkiLib/primitives/scene_query.py` | 历史 RoboDK 计划；当前不建 | 1.1 |
+| `SkiLib/skills/task_skills.py` | 历史 RoboDK 计划；Genesis metatools 已覆盖基础查询 | 1.2 / G3 |
+| `SkiLib/specs/example_assembly.yaml` | 后续工艺知识扩展项 | 1.3 |
 | `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
 | `SkiLib/metatools/informative.py` | ✅ 完成（T-skills: list_targets/objects/tools, check_item_exists, get_gripper_state） | 新增 |
 | `Agent/state.py` | ✅ 完成（GlobalState TypedDict） | 6.2 |
@@ -334,18 +361,26 @@
 | `Agent/nodes/` | ✅ 完成（7 个节点均已迁移） | 6.2 |
 | `Agent/notebooks/graph_test.ipynb` | 参考文档（核心逻辑已迁移至 Agent/ 包） | — |
 | `SkiLib/graph.py` | ⚠️ 错位文件（含 LangGraph 依赖，违反 SkiLib 约束）；待废弃 | — |
-| `SkiLib/main.py` | ⚠️ 调试用，待重写 | 3.6 |
+| `SkiLib/main.py` | ⚠️ 调试用 | 3.6 |
 
 ---
 
-## 命名约定（RoboDK 树）
+## 命名约定（Genesis 当前场景）
 
 ```
-RoboDK Tree 中目标点命名规范：
-  - 抓取目标：<PartName>_Pick         e.g. "PartA_Pick"
-  - 接近点：  Approach_<TargetName>   e.g. "Approach_PartA_Pick"
-  - 放置目标：<TrayName>_Place        e.g. "Tray1_Place"
-  - 接近点：  Approach_<TargetName>   e.g. "Approach_Tray1_Place"
+对象：
+  - Part_A_1
+  - Part_B_1
+  - Part_C_1
+
+目标：
+  - Home_position
+  - PartA_Approach / PartA_Pick
+  - PartB_Approach / PartB_Pick
+  - PartC_Approach / PartC_Pick
+  - AssemblySlot_1_Approach / AssemblySlot_1
+  - AssemblySlot_2_Approach / AssemblySlot_2
+  - AssemblySlot_3_Approach / AssemblySlot_3
 ```
 
-`GetApproachTarget` 按此约定查找；不存在时报 `NO_APPROACH_TARGET` 而非幻觉出坐标。
+LLM-facing 参数必须使用这些符号名。接近点当前是显式参数，不通过 `GetApproachTarget` 自动查找。

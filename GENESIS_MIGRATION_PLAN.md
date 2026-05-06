@@ -305,72 +305,163 @@ requirements-legacy-robodk.txt   # 仅旧 RoboDK 参考，不参与主流程
 
 ### Phase 4：实现 Genesis Gripper Primitives
 
-- 重写 `SkiLib/primitives/gripper.py`。
-- 实现夹爪 open/close qpos。
-- 实现 kinematic attachment。
-- `get_gripper_state()` 和 sensor tools 读取 held item。
+> ✅ **完成（2026-05-05 核实）**
+
+- [x] 重写 `SkiLib/primitives/gripper.py`。
+- [x] 实现夹爪 open/close qpos（`runtime.open_gripper()` + `set_dofs_position`）。
+- [x] 实现 kinematic attachment（Genesis `rigid_solver.add_weld_constraint`）。
+- [x] `get_gripper_state()` 和 sensor tools 读取 held item。
 
 验收：
 
-- 到达 `PartA_Pick` 后 `Grasp("Part_A_1")` 成功。
-- 移动过程中 `Part_A_1` 跟随 TCP。
-- `Release("Part_A_1")` 后 held state 清空。
+- [x] 到达 `PartA_Pick` 后 `Grasp(“Part_A_1”)` 成功。
+- [x] 移动过程中 `Part_A_1` 跟随 TCP。
+- [x] `Release(“Part_A_1”)` 后 held state 清空。
+
+**实际实现与原计划的偏差：**
+- `Grasp` 判定距离阈值为 0.18 m（捕获半径较大，对应 UR16e 腕部到夹爪指尖的完整偏移量）。
+- weld constraint 绑定的是物体质心 link 与 TCP link（`wrist_3_link`），不是夹爪指尖。
+- `open_gripper()` 同时调用 `set_dofs_position` + `control_dofs_position`，保证 viewer 立即反映开爪状态。
+
+**未计划但已实现：**
+- `GenesisRuntime.reset()`：解除 weld constraint，清空 `held_item_name`，调用 `scene.reset()`，恢复 home_qpos，重新开爪。供每轮测试/训练的 episode 重置使用。
+
+---
+
+### Phase 4.5：GenesisController（原计划未包含，实际新增）
+
+> ✅ **完成（2026-05-05 核实）**，文件：`SkiLib/genesis/controller.py`
+
+Genesis 要求所有 `scene.step()` 调用在同一线程（macOS pyrender 限制）。Agent/Skill 运行于 LangGraph worker 线程，与 viewer 主线程存在冲突。为此引入 `GenesisController`：
+
+- 单线程任务队列（`queue.Queue`），将 primitive 执行函数序列化到 Genesis 主线程。
+- 空闲时以 ~60 fps 主动 hold 手臂和夹爪位置，防止重力下沉。
+- worker 线程调用 `ctrl.submit(fn, ...)` → 阻塞等待 `Future.result()`，对 primitive 代码透明。
+- `is_genesis_thread()` 检测防止主线程直接调用时死锁。
+
+---
 
 ### Phase 5：迁移 PickAndPlace
 
-- 修改 `SkiLib/skills/pick_and_place.py` 的符号解析。
-- 检查 `check()` 中每一步的 primitive 调用是否仍合理。
-- 保持 LLM-facing 参数仍然是字符串。
+> ✅ **完成（2026-05-05 核实）**
+
+- [x] 修改 `SkiLib/skills/pick_and_place.py` 的符号解析。
+- [x] 检查 `check()` 中每一步的 primitive 调用是否仍合理。
+- [x] 保持 LLM-facing 参数仍然是字符串。
 
 验收：
 
-- `PickAndPlace.try_execute(...)` 可以完成单个零件从 parts tray 到 assembly tray。
-- pre-flight failure 能返回清晰错误。
+- [x] `PickAndPlace.try_execute(...)` 可以完成单个零件从 parts tray 到 assembly tray。
+- [x] pre-flight failure 能返回清晰错误。
+
+**实际实现与原计划的偏差：**
+- 原计划 8 步执行序列，实际实现为 **10 步**（增加了 pick_approach 归位和 place_approach 归位两步，对应 “抬升后才平移” 的安全策略）：
+  1. `initial_motion` → home_position
+  2. MoveL → pick_approach
+  3. MoveL → pick_target
+  4. Grasp item
+  5. MoveL → pick_approach（归位抬升）
+  6. `transit_motion` → place_approach
+  7. MoveL → place_target
+  8. Release item
+  9. MoveL → place_approach（归位抬升）
+  10. MoveL → home_position
+- 参数：`item, home_position, pick_approach, pick_target, place_approach, place_target, transit_motion=”MoveL”, initial_motion=”MoveL”`
+- `check()` 对每个步骤都做符号存在性 + IK 可达性 pre-flight 验证。
+
+---
 
 ### Phase 6：Agent 集成
 
-- 用 Genesis metatools 驱动 Supervisor。
-- Planner 继续生成 `PickAndPlace` 任务。
-- Executor 通过 `SkillRegistry` 调用 Genesis 版技能。
-- GUI / CLI 初始化 Genesis context。
+> ✅ **完成（2026-05-05 核实）**
+
+- [x] 用 Genesis metatools 驱动 Supervisor。
+- [x] Planner 继续生成 `PickAndPlace` 任务。
+- [x] Executor 通过 `SkillRegistry` 调用 Genesis 版技能。
+- [x] GUI / CLI 初始化 Genesis context。
 
 验收：
 
-- Agent 能看到 Genesis targets 和 objects。
-- 计划审批后能执行一个零件 pick-and-place。
-- 失败进入现有 HITL 路径。
+- [x] Agent 能看到 Genesis targets 和 objects。
+- [x] 计划审批后能执行一个零件 pick-and-place。
+- [x] 失败进入现有 HITL 路径。
+
+**遗留问题（Phase 6 完成但未修复）：**
+- CLI 入口（`python -m Agent “<指令>”`）使用 `graph.invoke()`，遇到 interrupt 节点会抛 `NodeInterrupt` 异常；含 HITL 审批的完整流程须通过 GUI 运行。
+
+---
 
 ### Phase 7：清理文档和依赖
 
-- 更新 `README.md`。
-- 更新 `CLAUDE.md` 技术栈和目录结构。
-- 更新 `SkiLib/ARCHITECTURE.md`。
-- 更新 `IMPLEMENTATION_CHECKLIST.md`。
-- 移除或归档 RoboDK 旧说明。
-- 清理 `requirements.txt` / `environment.yml`。
+> 🔶 **进行中（2026-05-06 文档主路径已纠偏，依赖清理未完成）**
+
+- [x] 更新 `README.md`。
+- [x] 更新 `ROADMAP.md`。
+- [x] 更新 `CLAUDE.md` 技术栈和目录结构。
+- [x] 更新 `SkiLib/ARCHITECTURE.md`。
+- [x] 更新 `IMPLEMENTATION_CHECKLIST.md`。
+- [x] 移除或归档主入口文档中的 RoboDK 主后端叙事。
+- [ ] 清理 `requirements.txt` / `environment.yml`。
 
 验收：
 
-- 文档不再把 RoboDK 描述为主仿真后端。
-- 新人按 README 能启动 Genesis 场景和 Agent。
+- [x] 主入口文档不再把 RoboDK 描述为主仿真后端。
+- [ ] 新人按 README 能启动 Genesis 场景和 Agent。（待实际环境验证）
+
+---
 
 ## 风险与待确认问题
 
-1. Genesis IK API 的具体调用方式和返回失败的表现。
-2. URDF 中 TCP link 名称，需要确认 Robotiq 指尖或 tool0 作为控制 TCP。
-3. Robotiq mimic joints 是否能简单用 dof position 控制。
-4. MoveL 的姿态插值是否需要四元数 slerp，第一阶段可固定姿态。
-5. 碰撞检测和 RoboDK `MoveJ_Test` / `MoveL_Test` 不等价，第一阶段应明确降级。
-6. kinematic attachment 与物理接触不同，后续如要真实抓取，需要单独做接触/摩擦建模。
+> 以下为原计划记录，已在实现中确认的条目保留说明。
 
-## 建议第一个开发切片
+1. ~~Genesis IK API 的具体调用方式和返回失败的表现。~~ → **已解决**：使用 `robot.inverse_kinematics(link, pos, quat, init_qpos, dofs_idx_local, return_error=True)`；位置误差阈值 <0.005 m，旋转 <0.05 rad。
+2. ~~URDF 中 TCP link 名称，需要确认 Robotiq 指尖或 tool0 作为控制 TCP。~~ → **已解决**：控制 TCP 为 `wrist_3_link`，在 scene.py 中加固定偏移 Z = 0.172 m（到 Robotiq 2F-85 指尖接触面）。
+3. ~~Robotiq mimic joints 是否能简单用 dof position 控制。~~ → **已解决**：仅控制第一个夹爪 dof（`gripper_dofs`），mimic joint 由 URDF 内部约束处理。
+4. ~~MoveL 的姿态插值是否需要四元数 slerp，第一阶段可固定姿态。~~ → **已按计划降级**：MoveL 固定 top-down 姿态，不做 slerp；足够支持当前装配任务。
+5. ~~碰撞检测和 RoboDK `MoveJ_Test` / `MoveL_Test` 不等价，第一阶段应明确降级。~~ → **已明确降级**：当前无碰撞检测，仅依赖 IK 失败和超时判定失败；后续可扩展。
+6. kinematic attachment 与物理接触不同，后续如要真实抓取，需要单独做接触/摩擦建模。→ **仍开放**，当前 weld constraint 足以验证计划正确性。
 
-第一步不要直接写 MoveL。先建立 Genesis runtime 骨架：
+**新增风险（实现过程中发现）：**
 
-1. 新建 `SkiLib/genesis/types.py`。
-2. 新建 `SkiLib/genesis/scene.py`，把 `res/genesis_scene_test.py` 拆进去。
-3. 新建 `SkiLib/genesis/runtime.py`，实现 targets / objects / tools registry。
-4. 改造 `RobotContext` 初始化 Genesis。
-5. 改造 `metatools/informative.py`，让 Supervisor 能列出 Genesis 世界里的符号。
+7. **传送带追踪不可行**：当前 `SceneTarget` 为 frozen dataclass，`control_to_qpos` 驱动到固定 qpos，无法跟踪运动中的物体。若要支持传送带动态追踪，需新增追踪控制循环（每步查 entity live pos → IK → 控制）。
+8. **MoveL 采样固定**：20 个 waypoint，无自适应步长。长距离直线或关节空间跨度大时可能因中间 IK 失败而整段失败，也可能在接近奇异点时跳变。
+9. **episode reset 与 weld constraint 耦合**：`reset()` 在删除 weld constraint 时若仿真已出现约束损坏，可能静默失败；多 episode 长期运行需关注。
+10. **并发 rollout 不支持**：`GenesisRuntime` 是进程级单例，RL 多进程 rollout 须在不同进程中分别初始化，不能共享 controller。
 
-完成这一步后，上层 Agent 就能“看见” Genesis 场景；随后再逐个迁移 motion 和 gripper primitive。
+---
+
+## ~~建议第一个开发切片~~
+
+> ⚠️ **此节已过期**（Phase 1–6 已完成，保留为历史记录）
+
+~~第一步不要直接写 MoveL。先建立 Genesis runtime 骨架：~~
+
+~~1. 新建 `SkiLib/genesis/types.py`。~~
+~~2. 新建 `SkiLib/genesis/scene.py`，把 `res/genesis_scene_test.py` 拆进去。~~
+~~3. 新建 `SkiLib/genesis/runtime.py`，实现 targets / objects / tools registry。~~
+~~4. 改造 `RobotContext` 初始化 Genesis。~~
+~~5. 改造 `metatools/informative.py`，让 Supervisor 能列出 Genesis 世界里的符号。~~
+
+~~完成这一步后，上层 Agent 就能”看见” Genesis 场景；随后再逐个迁移 motion 和 gripper primitive。~~
+
+---
+
+## 当前状态总览（2026-05-05 核实）
+
+| Phase | 内容 | 状态 |
+|-------|------|------|
+| Phase 0 | 冻结 RoboDK 旧路径 | ✅ |
+| Phase 1 | Genesis Scene Runtime | ✅ |
+| Phase 2 | RobotContext + metatools | ✅ |
+| Phase 3 | Motion Primitives（MoveJ / MoveL）| ✅ |
+| Phase 4 | Gripper Primitives（Grasp / Release）| ✅ |
+| Phase 4.5 | GenesisController（新增）| ✅ |
+| Phase 5 | PickAndPlace 迁移 | ✅ |
+| Phase 6 | Agent 集成（GUI）| ✅ |
+| Phase 7 | 文档和依赖清理 | ⬜ |
+
+**主要遗留项（按优先级）：**
+1. Phase 7 文档清理
+2. CLI interrupt 处理（`python -m Agent` 路径）
+3. MoveL 奇异点检测 / 自适应步长（可选增强）
+4. 传送带动态追踪支持（如引入该场景）

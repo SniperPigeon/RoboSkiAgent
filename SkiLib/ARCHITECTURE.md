@@ -21,7 +21,7 @@ graph TB
             RC["RobotContext\nGenesis singleton"]
         end
         subgraph Skills["Skills · platform-agnostic"]
-            PaP["PickAndPlace\n8-step sequence"]
+            PaP["PickAndPlace\n10-step safe sequence"]
         end
         subgraph Prims["Primitives · Genesis-bound"]
             MJ["MoveJ"] & ML["MoveL"]
