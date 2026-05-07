@@ -8,20 +8,40 @@ import numpy as np
 from SkiLib.genesis.types import GenesisSceneBundle, SceneObject, SceneTarget, TargetPose
 
 RES_DIR = Path(__file__).resolve().parents[2] / "res"
+GEAR_DIR = RES_DIR / "industrealkit" / "gears" / "stl"
 
-TABLE_H = 0.72
-TABLE_CX = 0.7
-ROBOT_X = 0.35
-TRAY_X = 0.35
-TRAY_Y = 0.32
-TRAY_H = 0.04
-WALL_T = 0.01
-TRAY_POS = (0.80, 0.22, TABLE_H)
-ASSY_POS = (0.80, -0.22, TABLE_H)
+# ── Table / robot constants ───────────────────────────────────────────────────
+TABLE_H   = 0.72
+TABLE_CX  = 0.7
+ROBOT_X   = 0.35
 TCP_LINK_NAME = "wrist_3_link"
 # Vertical distance from wrist_3_link (TCP) to Robotiq 2F-85 finger contact surface.
 # Tune this value if the gripper visually over- or under-shoots the part during pick.
 TCP_OFFSET_Z = 0.172
+
+# ── Gear scene constants ──────────────────────────────────────────────────────
+# gear_base STL: 150×75×25 mm, z_min=0, origin at centre of bottom face.
+GEAR_BASE_X = 0.78
+GEAR_BASE_Y = 0.00
+GEAR_BASE_H = 0.025   # plate height (z_max of STL)
+
+# All three gears share the same 25 mm thickness (y-span in STL).
+# euler=(-90,0,0) rotates disc to XY plane; original y:[0,25mm] → z:[-25,0]mm.
+# Lift pos_z by GEAR_THICKNESS so the bottom face sits flush on the table.
+GEAR_THICKNESS = 0.025
+
+# Staging area: gears wait here before being picked (robot's y+ side).
+STAGE_Y = 0.28
+GEAR_STAGE_X = {"Small": 0.62, "Medium": 0.78, "Large": 0.94}
+
+# Shaft slot x-positions on gear_base (evenly spaced, tunable after visual check).
+SHAFT_X = {
+    "Large":  GEAR_BASE_X - 0.040, # 之前放反了
+    "Medium": GEAR_BASE_X,
+    "Small":  GEAR_BASE_X + 0.040,
+}
+
+APPROACH_CLEARANCE = 0.14   # TCP lifts this far above pick/place before transiting
 
 _GENESIS_INITIALIZED = False
 
@@ -57,31 +77,8 @@ def _patch_empty_cpu_name() -> None:
     genesis_misc.cpuinfo.get_cpu_info = _patched_get_cpu_info
 
 
-def _add_tray(scene, gs, cx, cy, cz, w, d, h, t, color) -> None:
-    scene.add_entity(
-        gs.morphs.Box(size=(w, d, t), fixed=True, pos=(cx, cy, cz + t / 2)),
-        surface=gs.surfaces.Default(color=color),
-    )
-    scene.add_entity(
-        gs.morphs.Box(size=(t, d, h), fixed=True, pos=(cx - w / 2 + t / 2, cy, cz + h / 2)),
-        surface=gs.surfaces.Default(color=color),
-    )
-    scene.add_entity(
-        gs.morphs.Box(size=(t, d, h), fixed=True, pos=(cx + w / 2 - t / 2, cy, cz + h / 2)),
-        surface=gs.surfaces.Default(color=color),
-    )
-    scene.add_entity(
-        gs.morphs.Box(size=(w, t, h), fixed=True, pos=(cx, cy - d / 2 + t / 2, cz + h / 2)),
-        surface=gs.surfaces.Default(color=color),
-    )
-    scene.add_entity(
-        gs.morphs.Box(size=(w, t, h), fixed=True, pos=(cx, cy + d / 2 - t / 2, cz + h / 2)),
-        surface=gs.surfaces.Default(color=color),
-    )
-
-
 def _make_target(name: str, pos: tuple[float, float, float], kind: str) -> SceneTarget:
-    # Fixed top-down orientation for Phase 1. Motion primitives can refine this later.
+    # Fixed top-down orientation for Phase 1.
     pose = TargetPose(
         name=name,
         pos=pos,
@@ -91,56 +88,45 @@ def _make_target(name: str, pos: tuple[float, float, float], kind: str) -> Scene
     return SceneTarget(name=name, pose=pose)
 
 
-def _build_targets() -> dict[str, SceneTarget]:
-    tx, ty = TRAY_POS[0], TRAY_POS[1]
-    ax, ay = ASSY_POS[0], ASSY_POS[1]
+def _build_gear_targets() -> dict[str, SceneTarget]:
+    """Build symbolic target registry for the gear assembly scene.
 
-    # Finger-contact heights = centre of each part geometry (world Z).
-    # Part A — Cylinder(height=0.06): centre at +0.030 above part_base
-    # Part B — Box(z=0.050):          centre at +0.025 above part_base
-    # Part C — Box(z=0.040):          centre at +0.020 above part_base
-    _part_base_z = TABLE_H + WALL_T + 0.001  # bottom face of resting parts
-    finger_z = {
-        "A": _part_base_z + 0.030,
-        "B": _part_base_z + 0.025,
-        "C": _part_base_z + 0.020,
-    }
-    # TCP (wrist_3_link) must be TCP_OFFSET_Z above the desired finger-contact height.
-    def _tcp(fz: float) -> float:
-        return fz + TCP_OFFSET_Z
+    All z-coordinates are TCP positions (wrist_3_link), not finger-contact heights.
+    TCP_z = finger_contact_z + TCP_OFFSET_Z.
 
-    approach_clearance = 0.14  # wrist lifts this far above pick TCP before transiting
+    Pick: fingers grip gear at mid-thickness, gear lying flat on table.
+      finger_z = TABLE_H + GEAR_THICKNESS / 2
+      tcp_z    = finger_z + TCP_OFFSET_Z
 
-    pick_positions = {
-        "PartA": (tx - 0.06, ty + 0.05, _tcp(finger_z["A"])),
-        "PartB": (tx + 0.06, ty + 0.05, _tcp(finger_z["B"])),
-        "PartC": (tx, ty - 0.05, _tcp(finger_z["C"])),
-    }
-    place_positions = {
-        "AssemblySlot_1": (ax - 0.06, ay + 0.05, _tcp(finger_z["A"])),
-        "AssemblySlot_2": (ax + 0.06, ay + 0.05, _tcp(finger_z["B"])),
-        "AssemblySlot_3": (ax, ay - 0.05, _tcp(finger_z["C"])),
-    }
+    Place: gear rests on top of gear_base plate.
+      finger_z = TABLE_H + GEAR_BASE_H + GEAR_THICKNESS / 2
+      tcp_z    = finger_z + TCP_OFFSET_Z
+    """
+    pick_tcp_z  = TABLE_H + GEAR_THICKNESS / 2 + TCP_OFFSET_Z   # 0.7325 + 0.172 = 0.9045
+    place_tcp_z = TABLE_H + GEAR_BASE_H + GEAR_THICKNESS / 2 + TCP_OFFSET_Z  # 0.7575 + 0.172 = 0.9295
 
     targets: dict[str, SceneTarget] = {
-        "Home_position": _make_target("Home_position", (0.55, 0.0, TABLE_H + 0.45), "home"),
+        "Home_position": _make_target(
+            "Home_position", (0.55, 0.0, TABLE_H + 0.45), "home"
+        ),
     }
 
-    for prefix, pos in pick_positions.items():
-        targets[f"{prefix}_Pick"] = _make_target(f"{prefix}_Pick", pos, "pick")
-        targets[f"{prefix}_Approach"] = _make_target(
-            f"{prefix}_Approach",
-            (pos[0], pos[1], pos[2] + approach_clearance),
-            "approach",
-        )
+    for size in ("Small", "Medium", "Large"):
+        sx, sy = GEAR_STAGE_X[size], STAGE_Y
+        pick_pos   = (sx, sy, pick_tcp_z)
+        pick_appr  = (sx, sy, pick_tcp_z + APPROACH_CLEARANCE)
 
-    for name, pos in place_positions.items():
-        targets[name] = _make_target(name, pos, "place")
-        targets[f"{name}_Approach"] = _make_target(
-            f"{name}_Approach",
-            (pos[0], pos[1], pos[2] + approach_clearance),
-            "approach",
-        )
+        shaft_x = SHAFT_X[size]
+        place_pos  = (shaft_x, GEAR_BASE_Y, place_tcp_z)
+        place_appr = (shaft_x, GEAR_BASE_Y, place_tcp_z + APPROACH_CLEARANCE)
+
+        label_pick  = f"Gear{size}"
+        label_place = f"ShaftSlot_{size}"
+
+        targets[f"{label_pick}_Approach"] = _make_target(f"{label_pick}_Approach", pick_appr,  "approach")
+        targets[f"{label_pick}_Pick"]     = _make_target(f"{label_pick}_Pick",     pick_pos,   "pick")
+        targets[f"{label_place}_Approach"]= _make_target(f"{label_place}_Approach",place_appr, "approach")
+        targets[f"{label_place}_Place"]   = _make_target(f"{label_place}_Place",   place_pos,  "place")
 
     return targets
 
@@ -148,10 +134,6 @@ def _build_targets() -> dict[str, SceneTarget]:
 def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/roboski-matplotlib")
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp/roboski-cache")
-    # pyrender's jit_render uses address_to_ptr() which is a JIT-only intrinsic;
-    # NUMBA_DISABLE_JIT=1 crashes the viewer.  When show_viewer=True, force JIT on
-    # regardless of what the env already has (must be set before numba is imported).
-    # Headless/CI runs default to JIT-off for faster startup.
     if show_viewer:
         os.environ["NUMBA_DISABLE_JIT"] = os.getenv("ROBOSKI_NUMBA_DISABLE_JIT", "0")
     else:
@@ -165,19 +147,21 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
         show_viewer=show_viewer,
         viewer_options=gs.options.ViewerOptions(
             res=(1280, 720),
-            camera_pos=(0.0, -1.8, 1.8),
-            camera_lookat=(0.8, 0.0, 0.9),
+            camera_pos=(0.5, -1.6, 1.6),
+            camera_lookat=(0.78, 0.0, 0.85),
         ),
     )
     if not show_viewer and os.getenv("ROBOSKI_GENESIS_BUILD_VISUALIZER", "0") not in {"1", "true", "True"}:
         scene._visualizer.build = lambda: None
 
+    # ── Ground + table ────────────────────────────────────────────────────────
     scene.add_entity(gs.morphs.Plane())
     scene.add_entity(
         gs.morphs.Box(size=(1.0, 0.8, TABLE_H), fixed=True, pos=(TABLE_CX, 0.0, TABLE_H / 2)),
         surface=gs.surfaces.Default(color=(0.85, 0.75, 0.6, 1.0)),
     )
 
+    # ── Robot ─────────────────────────────────────────────────────────────────
     robot = scene.add_entity(
         gs.morphs.URDF(
             file=str(RES_DIR / "ur16e_robotiq.urdf"),
@@ -186,52 +170,61 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
         ),
     )
 
-    _add_tray(scene, gs, *TRAY_POS, TRAY_X, TRAY_Y, TRAY_H, WALL_T, color=(0.7, 0.7, 0.75, 1.0))
-    _add_tray(scene, gs, *ASSY_POS, TRAY_X, TRAY_Y, TRAY_H, WALL_T, color=(0.4, 0.5, 0.6, 1.0))
-
-    part_z = TABLE_H + WALL_T + 0.001
-    tx, ty = TRAY_POS[0], TRAY_POS[1]
-    part_a = scene.add_entity(
-        gs.morphs.Cylinder(radius=0.025, height=0.06, pos=(tx - 0.06, ty + 0.05, part_z + 0.030)),
-        surface=gs.surfaces.Default(color=(0.9, 0.2, 0.2, 1.0)),
-    )
-    part_b = scene.add_entity(
-        gs.morphs.Box(size=(0.050, 0.040, 0.050), pos=(tx + 0.06, ty + 0.05, part_z + 0.025)),
-        surface=gs.surfaces.Default(color=(0.2, 0.8, 0.3, 1.0)),
-    )
-    part_c = scene.add_entity(
-        gs.morphs.Box(size=(0.060, 0.060, 0.040), pos=(tx, ty - 0.05, part_z + 0.020)),
-        surface=gs.surfaces.Default(color=(0.2, 0.4, 0.9, 1.0)),
+    # ── Gear base (fixed assembly platform) ───────────────────────────────────
+    # STL z_min=0 → origin at bottom face centre, sits flush on table at TABLE_H.
+    scene.add_entity(
+        gs.morphs.Mesh(
+            file=str(GEAR_DIR / "gear_base.stl"),
+            fixed=True,
+            pos=(GEAR_BASE_X, GEAR_BASE_Y, TABLE_H),
+        ),
+        surface=gs.surfaces.Default(color=(0.30, 0.40, 0.60, 1.0)),
     )
 
+    # ── Gears (dynamic, in staging area) ─────────────────────────────────────
+    # euler=(-90,0,0): disc lies flat (XY plane), teeth face up.
+    # STL y:[0,25mm] → after rotation z:[-25,0]mm; lift pos_z by GEAR_THICKNESS.
+    def _add_gear(filename: str, color: tuple, stage_x: float):
+        return scene.add_entity(
+            gs.morphs.Mesh(
+                file=str(GEAR_DIR / filename),
+                pos=(stage_x, STAGE_Y, TABLE_H + GEAR_THICKNESS),
+                euler=(-90, 0, 0),
+            ),
+            surface=gs.surfaces.Default(color=color),
+        )
+
+    gear_small  = _add_gear("gear_small.stl",  (0.90, 0.75, 0.20, 1.0), GEAR_STAGE_X["Small"])
+    gear_medium = _add_gear("gear_medium.stl", (0.85, 0.50, 0.15, 1.0), GEAR_STAGE_X["Medium"])
+    gear_large  = _add_gear("gear_large.stl",  (0.75, 0.25, 0.15, 1.0), GEAR_STAGE_X["Large"])
+
+    # ── Build + PD init ───────────────────────────────────────────────────────
     scene.build()
 
-    arm_home = np.array([0, -np.pi / 2, np.pi / 2, -np.pi / 2, -np.pi / 2, 0], dtype=float)
-    grip_home = np.zeros(max(0, int(robot.n_dofs) - 6), dtype=float)
-    home_qpos = np.concatenate([arm_home, grip_home])
-    arm_dofs = np.arange(6)
+    arm_home   = np.array([0, -np.pi / 2, np.pi / 2, -np.pi / 2, -np.pi / 2, 0], dtype=float)
+    grip_home  = np.zeros(max(0, int(robot.n_dofs) - 6), dtype=float)
+    home_qpos  = np.concatenate([arm_home, grip_home])
+    arm_dofs   = np.arange(6)
     gripper_dofs = np.arange(6, int(robot.n_dofs))
 
     robot.set_dofs_kp(np.array([4000] * 6 + [200] * max(0, int(robot.n_dofs) - 6)))
-    robot.set_dofs_kv(np.array([100] * 6 + [10] * max(0, int(robot.n_dofs) - 6)))
+    robot.set_dofs_kv(np.array([100]  * 6 + [10]  * max(0, int(robot.n_dofs) - 6)))
     robot.set_dofs_force_range(
         np.array([-330] * 6 + [-50] * max(0, int(robot.n_dofs) - 6)),
-        np.array([330] * 6 + [50] * max(0, int(robot.n_dofs) - 6)),
+        np.array([ 330] * 6 + [ 50] * max(0, int(robot.n_dofs) - 6)),
     )
     robot.set_dofs_position(home_qpos[: int(robot.n_dofs)])
-    # Register the home configuration as the reset target.  scene.build() captures
-    # _init_state before set_dofs_position() runs, so we overwrite it here.
     scene.reset(scene.get_state())
 
     return GenesisSceneBundle(
         scene=scene,
         robot=robot,
         objects={
-            "Part_A_1": SceneObject("Part_A_1", part_a),
-            "Part_B_1": SceneObject("Part_B_1", part_b),
-            "Part_C_1": SceneObject("Part_C_1", part_c),
+            "Gear_Small_1":  SceneObject("Gear_Small_1",  gear_small),
+            "Gear_Medium_1": SceneObject("Gear_Medium_1", gear_medium),
+            "Gear_Large_1":  SceneObject("Gear_Large_1",  gear_large),
         },
-        targets=_build_targets(),
+        targets=_build_gear_targets(),
         tools={"Robotiq_2F_85": robot},
         arm_dofs=arm_dofs,
         gripper_dofs=gripper_dofs,
