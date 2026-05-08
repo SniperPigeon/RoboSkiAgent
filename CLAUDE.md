@@ -84,8 +84,9 @@ RoboSkiAgent/
     ├── log.py                      # Logger 工厂：get_logger(__name__)，双 Handler（控制台 + 轮转文件）
     ├── main.py                     # 技能库调试入口（非生产，独立于 Agent 编排）
     ├── genesis/                    # Genesis 后端实现：scene/runtime/controller/motion/types
+    │   ├── config.py               # 可调参数：PLACEMENT_XY_TOL_M / PLACEMENT_Z_TOL_M（放置验证容差）
     │   ├── scene.py                # build_genesis_scene(): UR16e + Robotiq + 零件 + 目标点
-    │   ├── runtime.py              # GenesisRuntime：scene、objects、targets、tools、reset()
+    │   ├── runtime.py              # GenesisRuntime：scene、objects、targets、tools、reset()、get_object_position()
     │   ├── motion.py               # IK、插值、PD 控制辅助
     │   ├── controller.py           # viewer/macOS 下 scene.step() 单线程序列化器
     │   └── types.py                # TargetPose / SceneTarget / SceneObject
@@ -93,9 +94,14 @@ RoboSkiAgent/
     │                               #   待迁移至 Agent/notebooks/ 或正式采纳后移入 Agent/graph.py
     ├── RDK_Test.py                 # legacy RoboDK 参考/历史实验
     ├── utils.py
-    ├── metatools/                  # T-skills：Supervisor 使用的只读场景查询工具（无坐标，符号名）
+    ├── skill_loader.py             # SkillMdLoader 单例：解析 skills/*.md，生成 Pydantic schema，供 Planner V2 / Executor V2 使用
+    ├── metatools/                  # T-skills：Supervisor 使用的只读场景查询工具（规划时，无坐标，只返回符号名）
     │   ├── __init__.py
     │   └── informative.py          # list_targets / list_objects / list_tools / check_item_exists / get_gripper_state
+    ├── sensors/                    # 执行时物理感知传感器：Executor V2 plan check / recovery 使用（可返回物理量）
+    │   ├── __init__.py             # SensorRegistry 单例：自动发现 sensors/*.py，汇聚所有 sensor tools
+    │   ├── gripper.py              # get_attachment_state / is_item_grasped：夹爪状态查询
+    │   └── placement.py            # get_object_position：工件 XY 放置状态（is_placed / xy_distance_to_nearest_place_m）
     ├── doc/
     │   ├── DEV_NOTES_SkillRegistry.md
     │   ├── IK_SOLVER_USAGE.md
@@ -104,9 +110,14 @@ RoboSkiAgent/
     │   ├── motion.py               # MoveJ (完整) / MoveL (完整，含 check())
     │   └── gripper.py              # Grasp (完整，仿真) / Release (完整，仿真)；参数 expected_item
     └── skills/
-        ├── pick_and_place.py       # PickAndPlace：Genesis 10步安全序列，显式接近点，initial_motion/transit_motion
+        ├── pick_and_place.py       # V1 PickAndPlace：Genesis 10步安全序列，显式接近点，initial_motion/transit_motion
+        ├── pick_and_place.md       # V2 PickAndPlace：LLM 执行指南 + check steps（含步骤8.5放置验证）
         └── dummy_skills.py         # 测试桩（非生产）
 ```
+
+**metatools vs sensors 定位区分**：
+- `metatools/`：规划阶段（Supervisor），只返回符号名，禁止坐标。
+- `sensors/`：执行阶段（Executor V2 check step / recovery），可返回物理量（距离、布尔值）。
 
 **Agent/ 与 SkiLib/ 的关系**：`Agent/` 是编排层，通过 `from SkiLib.xxx import ...` 调用技能库。依赖方向单向：`Agent → SkiLib`，SkiLib 本身不依赖 LangGraph。
 
@@ -485,6 +496,18 @@ Executor ReAct 循环重试时，`RemoveMessage` 的 ID 范围必须精确。建
 
 **Genesis 仿真 → 真机切换**
 Genesis 是当前仿真和任务验证后端。真实机器人执行尚未接入；未来切换逻辑应保持在 primitive/runtime 层，Executor 不感知仿真/真机差异。
+
+**静态 Pick Target 在 Recovery 场景下失效** *(2026-05-08 发现)*
+当前所有 pick / approach-pick target 在 `build_genesis_scene()` 时静态注册，基于齿轮 staging 区的初始位置。这在首次正常 pick 中成立，但一旦进入 recovery（pick 失败、放置失败需重新拾取），齿轮实际位置与静态 target 已不一致，会导致 recovery 路径直接二次失败。
+
+对比：place / approach-place target 描述轴孔位置（gear_base 固定），静态注册永远正确，不需要改动。
+
+**设计方向**：在 `sensors/` 层增加 `compute_pick_pose(item_name)` 工具，执行时读取 `entity.get_pos()` + `entity.get_quat()` 推算当前 TCP pick 坐标，并在 bundle 中注册为临时 target 供 MoveL 消费。Nominal 路径继续使用静态符号（无额外开销），recovery 子 agent 调用此工具拿到实时坐标。
+
+**实现时注意**：
+- 工具应在 `sensors/` 而非 `metatools/`（返回物理坐标，是执行阶段感知）
+- 临时 target 注册后需在 reset() 时清理，避免跨 episode 污染
+- 倾斜的齿轮（`tilt_angle_deg > PLACEMENT_TILT_TOL_DEG`）pick pose 计算逻辑需单独处理（当前只处理平躺情况）
 
 ---
 

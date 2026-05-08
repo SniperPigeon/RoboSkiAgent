@@ -4,31 +4,41 @@
 
 ---
 
-## 当前实现：Genesis 后端（2026-05-04）
+## 当前实现：Genesis 后端（2026-05-08，含 V2 双轨技能体系）
 
 ### 架构总览
 
 ```mermaid
 graph TB
     subgraph Agent["Agent Layer (LangGraph)"]
-        EXE["🤖 Executor\nnodes/executor_v2.py"]
+        EXE["🤖 Executor V2\nnodes/executor_v2.py\n(plan→execute→recover)"]
         SUP["🔍 Supervisor\nnodes/supervisor.py"]
     end
 
     subgraph SkiLib["SkiLib · Skill Library (no LangGraph dependency)"]
         subgraph Reg["Registry / Context"]
-            SR["SkillRegistry\nauto-scans skills/"]
+            SR["SkillRegistry\nauto-scans skills/*.py (V1)"]
+            SML["SkillMdLoader\nauto-scans skills/*.md (V2)"]
             RC["RobotContext\nGenesis singleton"]
         end
         subgraph Skills["Skills · platform-agnostic"]
-            PaP["PickAndPlace\n10-step safe sequence"]
+            PaP_py["PickAndPlace.py\nV1: Python 10-step sequence"]
+            PaP_md["pick_and_place.md\nV2: LLM execution guide + check steps"]
         end
         subgraph Prims["Primitives · Genesis-bound"]
             MJ["MoveJ"] & ML["MoveL"]
             GR["Grasp"] & RE["Release"]
         end
+        subgraph SensorLayer["Sensors · execution-time physical queries"]
+            SReg["SensorRegistry\nauto-scans sensors/*.py"]
+            SGrip["sensors/gripper.py\nget_attachment_state / is_item_grasped"]
+            SPlace["sensors/placement.py\nget_object_position (is_placed)"]
+        end
+        subgraph Meta["metatools/ · planning-time symbolic queries"]
+            INFO["informative.py\nlist_targets / list_objects / get_gripper_state\n(Supervisor T-skills, no coordinates)"]
+        end
         subgraph Genesis["SkiLib/genesis/"]
-            GRT["GenesisRuntime\nscene + registries"]
+            GRT["GenesisRuntime\nscene + registries\n+ get_object_position()"]
             GSC["build_genesis_scene()\nUR16e + objects + targets"]
             GMO["motion.py\nsolve_ik / control_to_qpos"]
             GCT["GenesisController\nmacOS thread serializer"]
@@ -37,10 +47,15 @@ graph TB
 
     GS(["⚙️ Genesis Physics Engine\ngs.Scene / gs.Robot"])
 
-    EXE -->|"get_skill(name)"| SR
-    SUP -->|"T-skills"| SR
-    SR --> PaP
-    PaP --> MJ & ML & GR & RE
+    EXE -->|"V1: get_skill(name)"| SR
+    EXE -->|"V2: get_spec(name)"| SML
+    EXE -->|"plan check steps"| SReg
+    SUP -->|"T-skills (planning)"| INFO
+    SR --> PaP_py
+    SML --> PaP_md
+    PaP_py & PaP_md --> MJ & ML & GR & RE
+    SReg --> SGrip & SPlace
+    SGrip & SPlace -->|"read physics state"| GRT
     RC --> GRT
     MJ & ML & GR & RE -->|"solve_ik / control_to_qpos"| GMO
     GMO -->|"scene.step()"| GRT
@@ -52,18 +67,33 @@ graph TB
     style Prims fill:#fce7f3,stroke:#ec4899
     style Reg fill:#fef3c7,stroke:#f59e0b
     style Genesis fill:#ede9fe,stroke:#7c3aed
+    style SensorLayer fill:#fff7ed,stroke:#f97316
+    style Meta fill:#f0fdf4,stroke:#16a34a
 ```
+
+### 两个工具层的定位区别
+
+| 层 | 路径 | 调用方 | 规则 |
+|----|------|--------|------|
+| **metatools** | `metatools/informative.py` | Supervisor（规划阶段） | 只返回符号名，禁止坐标 |
+| **sensors** | `sensors/*.py` | Executor V2 plan check / recovery | 可返回物理量（距离、布尔状态） |
+
+> **设计意图**：Supervisor 永远只看符号，Executor 在执行和恢复时可以读取物理量用于判断和纠错。
 
 ### 关键组件
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| `GenesisRuntime` | `genesis/runtime.py` | 场景单例，持有 scene/robot/targets/objects 注册表 |
+| `GenesisRuntime` | `genesis/runtime.py` | 场景单例，持有 scene/robot/targets/objects 注册表；`get_object_position()` 读取工件 XY 放置状态 |
 | `build_genesis_scene()` | `genesis/scene.py` | 工厂：加载 URDF，创建 UR16e + Robotiq 2F-85 + 零件 + 目标点 |
 | `solve_ik()` | `genesis/motion.py` | 包装 `robot.inverse_kinematics()`，返回 `IKResult` |
 | `control_to_qpos()` | `genesis/motion.py` | PD 控制循环，最多 `max_steps` 次 `scene.step()` |
 | `GenesisController` | `genesis/controller.py` | 把所有 `scene.step()` 序列化到单一线程（macOS viewer 限制） |
-| `RobotContext` | `robotcontext.py` | 单例门面，名称不变以保持上游调用兼容 |
+| `RobotContext` | `robotcontext.py` | 单例门面，名称不变以保持上游调用兼容；代理 `get_object_position()` |
+| `SkillMdLoader` | `skill_loader.py` | V2 技能加载器：解析 `skills/*.md`，生成 Pydantic schema，暴露 `body` 给 Executor |
+| `SensorRegistry` | `sensors/__init__.py` | 自动发现 `sensors/*.py`，汇聚所有 sensor tools 供 Executor V2 使用 |
+| `sensors/gripper.py` | `sensors/gripper.py` | 执行时夹爪状态查询：`get_attachment_state` / `is_item_grasped` |
+| `sensors/placement.py` | `sensors/placement.py` | 执行时放置验证：`get_object_position` → `is_placed`（XY 距 place target ≤ 5 cm） |
 
 ---
 

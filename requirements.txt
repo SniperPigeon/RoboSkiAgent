@@ -1,16 +1,17 @@
 --extra-index-url https://download.pytorch.org/whl/cu130
 python-dotenv
-torch 
+torch
 torchvision
 GPUtil
-langchain 
+langchain
 langchain-huggingface
-transformers 
-accelerate 
+transformers
+accelerate
 bitsandbytes
 openai
 langchain[huggingface]
 langchain[openai]
+langchain-openai
 langchain-anthropic
 huggingface_hub[hf_xet]
 python-dotenv
