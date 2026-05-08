@@ -84,7 +84,7 @@ graph TB
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| `GenesisRuntime` | `genesis/runtime.py` | 场景单例，持有 scene/robot/targets/objects 注册表；`get_object_position()` 读取工件 XY 放置状态 |
+| `GenesisRuntime` | `genesis/runtime.py` | 场景单例，持有 scene/robot/targets/objects 注册表；`get_object_position()` 三维验证（XY 距离 + Z 高度 + 圆盘倾斜角） |
 | `build_genesis_scene()` | `genesis/scene.py` | 工厂：加载 URDF，创建 UR16e + Robotiq 2F-85 + 零件 + 目标点 |
 | `solve_ik()` | `genesis/motion.py` | 包装 `robot.inverse_kinematics()`，返回 `IKResult` |
 | `control_to_qpos()` | `genesis/motion.py` | PD 控制循环，最多 `max_steps` 次 `scene.step()` |
@@ -93,7 +93,7 @@ graph TB
 | `SkillMdLoader` | `skill_loader.py` | V2 技能加载器：解析 `skills/*.md`，生成 Pydantic schema，暴露 `body` 给 Executor |
 | `SensorRegistry` | `sensors/__init__.py` | 自动发现 `sensors/*.py`，汇聚所有 sensor tools 供 Executor V2 使用 |
 | `sensors/gripper.py` | `sensors/gripper.py` | 执行时夹爪状态查询：`get_attachment_state` / `is_item_grasped` |
-| `sensors/placement.py` | `sensors/placement.py` | 执行时放置验证：`get_object_position` → `is_placed`（XY 距 place target ≤ 5 cm） |
+| `sensors/placement.py` | `sensors/placement.py` | 执行时放置验证：`get_object_position` → `is_placed`（XY + Z + 倾斜角三重检测，容差见 `genesis/config.py`） |
 
 ---
 

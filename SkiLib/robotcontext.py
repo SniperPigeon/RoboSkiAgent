@@ -101,6 +101,9 @@ class RobotContext:
     def resolve_item(self, name: str):
         return self.runtime.resolve_item(name)
 
+    def get_object_position(self, name: str) -> dict:
+        return self.runtime.get_object_position(name)
+
 
 class PrimitiveRegistry:
     """Auto-discovers and instantiates Genesis primitive classes."""
