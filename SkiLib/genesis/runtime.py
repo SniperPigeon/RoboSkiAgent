@@ -7,7 +7,10 @@ import numpy as np
 
 from SkiLib.base import RobotState
 from SkiLib.genesis.config import PLACEMENT_TILT_TOL_DEG, PLACEMENT_XY_TOL_M, PLACEMENT_Z_TOL_M
-from SkiLib.genesis.scene import TCP_OFFSET_Z, build_genesis_scene
+from SkiLib.genesis.scene import (
+    APPROACH_CLEARANCE, GEAR_THICKNESS, TCP_OFFSET_Z,
+    build_genesis_scene, make_target,
+)
 from SkiLib.genesis.types import GenesisSceneBundle, SceneObject, SceneTarget
 
 
@@ -24,6 +27,8 @@ class GenesisRuntime:
         self.held_item_name: str | None = None
         # Cached weld pair (obj_link.idx, tcp_link.idx) for the active grasp
         self._weld_pair: tuple[int, int] | None = None
+        # Names of targets dynamically registered during recovery (cleared on reset)
+        self._temp_targets: set[str] = set()
 
     @property
     def rigid_solver(self):
@@ -101,6 +106,67 @@ class GenesisRuntime:
         return {
             "active_tool": "Robotiq_2F_85",
             "grasped": [self.held_item_name] if self.held_item_name else [],
+        }
+
+    def compute_pick_pose(self, name: str) -> dict:
+        """Compute a valid TCP pick pose from the object's current physics position.
+
+        Reads entity.get_pos() and tilt, then registers two temporary scene targets:
+          Dynamic_Pick_<name>          — precise grasp TCP position
+          Dynamic_Pick_<name>_Approach — approach waypoint APPROACH_CLEARANCE above
+
+        These targets can be passed directly to MoveL by the recovery sub-agent.
+        They are removed on the next reset() call.
+
+        Returns is_pickable=False (no targets registered) when tilt exceeds
+        PLACEMENT_TILT_TOL_DEG — escalate to HITL in that case.
+        """
+        obj = self.resolve_object(name)
+        raw = obj.entity.get_pos()
+        pos_list = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+        pos = np.array(pos_list, dtype=float)
+
+        tilt_deg   = self._disc_tilt_deg(obj.entity)
+        is_pickable = (tilt_deg is None) or (tilt_deg <= PLACEMENT_TILT_TOL_DEG)
+
+        pick_name     = f"Dynamic_Pick_{name}"
+        approach_name = f"Dynamic_Pick_{name}_Approach"
+
+        if is_pickable:
+            pick_tcp_z    = float(pos[2]) + GEAR_THICKNESS / 2 + TCP_OFFSET_Z
+            approach_tcp_z = pick_tcp_z + APPROACH_CLEARANCE
+            self.bundle.targets[pick_name]     = make_target(
+                pick_name, (float(pos[0]), float(pos[1]), pick_tcp_z), "pick"
+            )
+            self.bundle.targets[approach_name] = make_target(
+                approach_name, (float(pos[0]), float(pos[1]), approach_tcp_z), "approach"
+            )
+            self._temp_targets.add(pick_name)
+            self._temp_targets.add(approach_name)
+
+        tilt_str = f"{tilt_deg:.1f}°" if tilt_deg is not None else "n/a"
+        if is_pickable:
+            desc = (
+                f"'{name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) m, "
+                f"tilt {tilt_str}. "
+                f"Targets registered: '{pick_name}', '{approach_name}'."
+            )
+        else:
+            desc = (
+                f"'{name}' is tilted {tilt_str} — cannot compute safe pick pose. "
+                f"Escalate to HITL."
+            )
+
+        return {
+            "item":                 name,
+            "pick_target_name":     pick_name     if is_pickable else None,
+            "approach_target_name": approach_name if is_pickable else None,
+            "obj_x":       round(float(pos[0]), 4),
+            "obj_y":       round(float(pos[1]), 4),
+            "obj_z":       round(float(pos[2]), 4),
+            "tilt_angle_deg": round(tilt_deg, 1) if tilt_deg is not None else None,
+            "is_pickable": is_pickable,
+            "description": desc,
         }
 
     @staticmethod
@@ -231,5 +297,8 @@ class GenesisRuntime:
                 pass
             self._weld_pair = None
         self.held_item_name = None
+        for tname in self._temp_targets:
+            self.bundle.targets.pop(tname, None)
+        self._temp_targets.clear()
         self.scene.reset()
         self.open_gripper()

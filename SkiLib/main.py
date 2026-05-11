@@ -16,14 +16,13 @@ skill_registry = SkillRegistry.instance()
 if __name__ == "__main__":
 
     # # ── Scene Enumeration ─────────────────────────────────────────────────────
-    # print("=== ItemList by type ===")
+    # print("=== ItemList by type ===")I
     # print("ROBOT:",   RDK.ItemList(filter=robolink.ITEM_TYPE_ROBOT,   list_names=True))
     # print("TARGET:",  RDK.ItemList(filter=robolink.ITEM_TYPE_TARGET,  list_names=True))
-    # print("FRAME:",   RDK.ItemList(filter=robolink.ITEM_TYPE_FRAME,   list_names=True))
+    # print("FRAME:",   RDK.ItemList(filter=robolink.TEM_TYPE_FRAME,   list_names=True))
     # print("TOOL:",    RDK.ItemList(filter=robolink.ITEM_TYPE_TOOL,    list_names=True))
     # print("OBJECT:",  RDK.ItemList(filter=robolink.ITEM_TYPE_OBJECT,  list_names=True))
     # print("PROGRAM:", RDK.ItemList(filter=robolink.ITEM_TYPE_PROGRAM, list_names=True))
-
     # # ── Single Item Metadata ──────────────────────────────────────────────────
     # print("\n=== Item metadata: 'App Pick Part A' ===")
     # item = RDK.Item("App Pick Part A")

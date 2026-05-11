@@ -105,8 +105,15 @@ Apply these hints **before** calling `escalate_to_hitl`.
     re-execute step 7 (`MoveL` to `place_target`), then retry `Release` and the
     check.  Maximum 1 retry.
   - If the item has been released but is displaced: the workpiece must be re-picked.
-    Return to step 2 (`MoveL` to `pick_approach`) and repeat the full pick-and-place
-    sequence.  Maximum 1 full retry.
+    The gear may no longer be at the original staging position, so do **not** reuse
+    the static `pick_approach` / `pick_target` names.  Instead:
+    1. Call `compute_pick_pose(item_name=<item>)` to get the current object position
+       and register fresh temporary targets.
+    2. Check `is_pickable` in the result.  If False (gear tilted), call
+       `escalate_to_hitl` immediately.
+    3. Use `approach_target_name` and `pick_target_name` from the result with MoveL
+       and Grasp, then proceed from step 6 (transit to place_approach).
+    Maximum 1 full retry.
   - If still failing after retries, call `escalate_to_hitl`.
 
 - **Any step returns COLLISION**:

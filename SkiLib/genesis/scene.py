@@ -34,11 +34,18 @@ GEAR_THICKNESS = 0.025
 STAGE_Y = 0.28
 GEAR_STAGE_X = {"Small": 0.62, "Medium": 0.78, "Large": 0.94}
 
-# Shaft slot x-positions on gear_base (evenly spaced, tunable after visual check).
+# Shaft x-positions on gear_base, measured from gear_base.stl Kasa circle-fit
+# on top cross-section (z = 22–25 mm), STL in metres.  Shaft radius = 4.14 mm.
+# Shafts are NOT uniformly spaced; old 40 mm assumption was 10–20 mm off.
+#   Large  shaft: circle centre x = -30.25 mm → GEAR_BASE_X - 0.03025
+#   Medium shaft: circle centre x = +20.25 mm → GEAR_BASE_X + 0.02025
+#   Small  shaft: circle centre x = +50.75 mm → GEAR_BASE_X + 0.05075
+# All three shafts sit at y = 0.00 mm (gear_base Y-symmetric, confirmed by fit).
+# Measurement uncertainty ≈ ±0.5 mm (STL polygon facets → imperfect circles).
 SHAFT_X = {
-    "Large":  GEAR_BASE_X - 0.040, # 之前放反了
-    "Medium": GEAR_BASE_X,
-    "Small":  GEAR_BASE_X + 0.040,
+    "Large":  GEAR_BASE_X - 0.03025,
+    "Medium": GEAR_BASE_X + 0.02025,
+    "Small":  GEAR_BASE_X + 0.05075,
 }
 
 APPROACH_CLEARANCE = 0.14   # TCP lifts this far above pick/place before transiting
@@ -77,8 +84,8 @@ def _patch_empty_cpu_name() -> None:
     genesis_misc.cpuinfo.get_cpu_info = _patched_get_cpu_info
 
 
-def _make_target(name: str, pos: tuple[float, float, float], kind: str) -> SceneTarget:
-    # Fixed top-down orientation for Phase 1.
+def make_target(name: str, pos: tuple[float, float, float], kind: str) -> SceneTarget:
+    """Create a SceneTarget with fixed top-down TCP orientation."""
     pose = TargetPose(
         name=name,
         pos=pos,
@@ -106,7 +113,7 @@ def _build_gear_targets() -> dict[str, SceneTarget]:
     place_tcp_z = TABLE_H + GEAR_BASE_H + GEAR_THICKNESS / 2 + TCP_OFFSET_Z  # 0.7575 + 0.172 = 0.9295
 
     targets: dict[str, SceneTarget] = {
-        "Home_position": _make_target(
+        "Home_position": make_target(
             "Home_position", (0.55, 0.0, TABLE_H + 0.45), "home"
         ),
     }
@@ -123,10 +130,10 @@ def _build_gear_targets() -> dict[str, SceneTarget]:
         label_pick  = f"Gear{size}"
         label_place = f"ShaftSlot_{size}"
 
-        targets[f"{label_pick}_Approach"] = _make_target(f"{label_pick}_Approach", pick_appr,  "approach")
-        targets[f"{label_pick}_Pick"]     = _make_target(f"{label_pick}_Pick",     pick_pos,   "pick")
-        targets[f"{label_place}_Approach"]= _make_target(f"{label_place}_Approach",place_appr, "approach")
-        targets[f"{label_place}_Place"]   = _make_target(f"{label_place}_Place",   place_pos,  "place")
+        targets[f"{label_pick}_Approach"] = make_target(f"{label_pick}_Approach", pick_appr,  "approach")
+        targets[f"{label_pick}_Pick"]     = make_target(f"{label_pick}_Pick",     pick_pos,   "pick")
+        targets[f"{label_place}_Approach"]= make_target(f"{label_place}_Approach",place_appr, "approach")
+        targets[f"{label_place}_Place"]   = make_target(f"{label_place}_Place",   place_pos,  "place")
 
     return targets
 

@@ -104,6 +104,9 @@ class RobotContext:
     def get_object_position(self, name: str) -> dict:
         return self.runtime.get_object_position(name)
 
+    def compute_pick_pose(self, name: str) -> dict:
+        return self.runtime.compute_pick_pose(name)
+
 
 class PrimitiveRegistry:
     """Auto-discovers and instantiates Genesis primitive classes."""

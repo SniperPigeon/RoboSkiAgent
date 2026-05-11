@@ -101,7 +101,8 @@ RoboSkiAgent/
     ├── sensors/                    # 执行时物理感知传感器：Executor V2 plan check / recovery 使用（可返回物理量）
     │   ├── __init__.py             # SensorRegistry 单例：自动发现 sensors/*.py，汇聚所有 sensor tools
     │   ├── gripper.py              # get_attachment_state / is_item_grasped：夹爪状态查询
-    │   └── placement.py            # get_object_position：工件 XY 放置状态（is_placed / xy_distance_to_nearest_place_m）
+    │   ├── placement.py            # get_object_position：工件放置验证（XY + Z + 倾斜角三重检测）
+    │   └── pick.py                 # compute_pick_pose：从实时物理位置推算 pick TCP 坐标，注册临时 target 供 MoveL 使用
     ├── doc/
     │   ├── DEV_NOTES_SkillRegistry.md
     │   ├── IK_SOLVER_USAGE.md
@@ -502,12 +503,12 @@ Genesis 是当前仿真和任务验证后端。真实机器人执行尚未接入
 
 对比：place / approach-place target 描述轴孔位置（gear_base 固定），静态注册永远正确，不需要改动。
 
-**设计方向**：在 `sensors/` 层增加 `compute_pick_pose(item_name)` 工具，执行时读取 `entity.get_pos()` + `entity.get_quat()` 推算当前 TCP pick 坐标，并在 bundle 中注册为临时 target 供 MoveL 消费。Nominal 路径继续使用静态符号（无额外开销），recovery 子 agent 调用此工具拿到实时坐标。
-
-**实现时注意**：
-- 工具应在 `sensors/` 而非 `metatools/`（返回物理坐标，是执行阶段感知）
-- 临时 target 注册后需在 reset() 时清理，避免跨 episode 污染
-- 倾斜的齿轮（`tilt_angle_deg > PLACEMENT_TILT_TOL_DEG`）pick pose 计算逻辑需单独处理（当前只处理平躺情况）
+**已实现**（2026-05-11）：`sensors/pick.py` 提供 `compute_pick_pose(item_name)` 工具。
+- 读 `entity.get_pos()` + `_disc_tilt_deg()` 推算 TCP pick 坐标
+- 在 `bundle.targets` 注册 `Dynamic_Pick_<item>` 和 `Dynamic_Pick_<item>_Approach` 两个临时 target
+- `GenesisRuntime.reset()` 自动清理，无跨 episode 污染
+- 若 `tilt_angle_deg > PLACEMENT_TILT_TOL_DEG`，返回 `is_pickable=False`，不注册 target，recovery LLM 应 escalate
+- Nominal 路径（首次 pick）仍使用静态 target，无额外开销
 
 ---
 

@@ -94,6 +94,7 @@ graph TB
 | `SensorRegistry` | `sensors/__init__.py` | 自动发现 `sensors/*.py`，汇聚所有 sensor tools 供 Executor V2 使用 |
 | `sensors/gripper.py` | `sensors/gripper.py` | 执行时夹爪状态查询：`get_attachment_state` / `is_item_grasped` |
 | `sensors/placement.py` | `sensors/placement.py` | 执行时放置验证：`get_object_position` → `is_placed`（XY + Z + 倾斜角三重检测，容差见 `genesis/config.py`） |
+| `sensors/pick.py` | `sensors/pick.py` | Recovery 动态拾取：`compute_pick_pose` 读实时物理位置，注册临时 target 供 MoveL 使用，`reset()` 时自动清理 |
 
 ---
 
