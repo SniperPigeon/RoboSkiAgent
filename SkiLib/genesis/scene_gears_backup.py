@@ -8,7 +8,7 @@ import numpy as np
 from SkiLib.genesis.types import GenesisSceneBundle, SceneObject, SceneTarget, TargetPose
 
 RES_DIR = Path(__file__).resolve().parents[2] / "res"
-FMB_DIR = RES_DIR / "fmb" / "processed"
+GEAR_DIR = RES_DIR / "industrealkit" / "gears" / "stl"
 
 # ── Table / robot constants ───────────────────────────────────────────────────
 TABLE_H   = 0.72
@@ -19,43 +19,34 @@ TCP_LINK_NAME = "wrist_3_link"
 # Tune this value if the gripper visually over- or under-shoots the part during pick.
 TCP_OFFSET_Z = 0.172
 
-# ── FMB scene constants ───────────────────────────────────────────────────────
-FMB_BOARD_X = 0.78
-FMB_BOARD_Y = 0.00
-FMB_STAGE_Y = 0.28
-FMB_PART_STAGE_X = {
-    "Part_A_1": 0.54,
-    "Part_A_2": 0.68,
-    "Part_B": 0.82,
-    "Part_C": 0.98,
-}
+# ── Gear scene constants ──────────────────────────────────────────────────────
+# gear_base STL: 150×75×25 mm, z_min=0, origin at centre of bottom face.
+GEAR_BASE_X = 0.78
+GEAR_BASE_Y = 0.00
+GEAR_BASE_H = 0.025   # plate height (z_max of STL)
 
-# Meshes were normalized to metres with bottom-centre origins in res/fmb/processed.
-FMB_PART_HEIGHT = {
-    "Part_A_1": 0.100,
-    "Part_A_2": 0.100,
-    "Part_B": 0.037,
-    "Part_C": 0.100,
-}
+# All three gears share the same 25 mm thickness (y-span in STL).
+# euler=(-90,0,0) rotates disc to XY plane; original y:[0,25mm] → z:[-25,0]mm.
+# Lift pos_z by GEAR_THICKNESS so the bottom face sits flush on the table.
+GEAR_THICKNESS = 0.025
 
-# Approximate assembly locations from the original Board 1 STEP body positions,
-# expressed relative to teasor_board's centre.  teasor_board is the central tray; the
-# remaining four bodies are staged as pickable parts.
-FMB_PLACE_XY = {
-    "Part_A_1": (FMB_BOARD_X - 0.068, FMB_BOARD_Y),
-    "Part_A_2": (FMB_BOARD_X + 0.068, FMB_BOARD_Y),
-    "Part_B": (FMB_BOARD_X, FMB_BOARD_Y),
-    "Part_C": (FMB_BOARD_X, FMB_BOARD_Y),
-}
-FMB_PLACE_BOTTOM_Z = {
-    "Part_A_1": TABLE_H + 0.005,
-    "Part_A_2": TABLE_H + 0.005,
-    "Part_B": TABLE_H + 0.040,
-    "Part_C": TABLE_H + 0.005,
-}
+# Staging area: gears wait here before being picked (robot's y+ side).
+STAGE_Y = 0.28
+GEAR_STAGE_X = {"Small": 0.62, "Medium": 0.78, "Large": 0.94}
 
-# Backward-compatible name used by runtime.compute_pick_pose().
-GEAR_THICKNESS = 0.050
+# Shaft x-positions on gear_base, measured from gear_base.stl Kasa circle-fit
+# on top cross-section (z = 22–25 mm), STL in metres.  Shaft radius = 4.14 mm.
+# Shafts are NOT uniformly spaced; old 40 mm assumption was 10–20 mm off.
+#   Large  shaft: circle centre x = -30.25 mm → GEAR_BASE_X - 0.03025
+#   Medium shaft: circle centre x = +20.25 mm → GEAR_BASE_X + 0.02025
+#   Small  shaft: circle centre x = +50.75 mm → GEAR_BASE_X + 0.05075
+# All three shafts sit at y = 0.00 mm (gear_base Y-symmetric, confirmed by fit).
+# Measurement uncertainty ≈ ±0.5 mm (STL polygon facets → imperfect circles).
+SHAFT_X = {
+    "Large":  GEAR_BASE_X - 0.03025,
+    "Medium": GEAR_BASE_X + 0.02025,
+    "Small":  GEAR_BASE_X + 0.05075,
+}
 
 APPROACH_CLEARANCE = 0.14   # TCP lifts this far above pick/place before transiting
 
@@ -104,36 +95,45 @@ def make_target(name: str, pos: tuple[float, float, float], kind: str) -> SceneT
     return SceneTarget(name=name, pose=pose)
 
 
-def _build_fmb_targets() -> dict[str, SceneTarget]:
-    """Build symbolic target registry for the FMB pick/place scene.
+def _build_gear_targets() -> dict[str, SceneTarget]:
+    """Build symbolic target registry for the gear assembly scene.
 
     All z-coordinates are TCP positions (wrist_3_link), not finger-contact heights.
     TCP_z = finger_contact_z + TCP_OFFSET_Z.
+
+    Pick: fingers grip gear at mid-thickness, gear lying flat on table.
+      finger_z = TABLE_H + GEAR_THICKNESS / 2
+      tcp_z    = finger_z + TCP_OFFSET_Z
+
+    Place: gear rests on top of gear_base plate.
+      finger_z = TABLE_H + GEAR_BASE_H + GEAR_THICKNESS / 2
+      tcp_z    = finger_z + TCP_OFFSET_Z
     """
+    pick_tcp_z  = TABLE_H + GEAR_THICKNESS / 2 + TCP_OFFSET_Z   # 0.7325 + 0.172 = 0.9045
+    place_tcp_z = TABLE_H + GEAR_BASE_H + GEAR_THICKNESS / 2 + TCP_OFFSET_Z  # 0.7575 + 0.172 = 0.9295
+
     targets: dict[str, SceneTarget] = {
         "Home_position": make_target(
             "Home_position", (0.55, 0.0, TABLE_H + 0.45), "home"
         ),
     }
 
-    for name in ("Part_A_1", "Part_A_2", "Part_B", "Part_C"):
-        height = FMB_PART_HEIGHT[name]
-        sx, sy = FMB_PART_STAGE_X[name], FMB_STAGE_Y
-        pick_tcp_z = TABLE_H + height / 2 + TCP_OFFSET_Z
-        pick_pos = (sx, sy, pick_tcp_z)
-        pick_appr = (sx, sy, pick_tcp_z + APPROACH_CLEARANCE)
+    for size in ("Small", "Medium", "Large"):
+        sx, sy = GEAR_STAGE_X[size], STAGE_Y
+        pick_pos   = (sx, sy, pick_tcp_z)
+        pick_appr  = (sx, sy, pick_tcp_z + APPROACH_CLEARANCE)
 
-        px, py = FMB_PLACE_XY[name]
-        place_tcp_z = FMB_PLACE_BOTTOM_Z[name] + height / 2 + TCP_OFFSET_Z
-        place_pos = (px, py, place_tcp_z)
-        place_appr = (px, py, place_tcp_z + APPROACH_CLEARANCE)
+        shaft_x = SHAFT_X[size]
+        place_pos  = (shaft_x, GEAR_BASE_Y, place_tcp_z)
+        place_appr = (shaft_x, GEAR_BASE_Y, place_tcp_z + APPROACH_CLEARANCE)
 
-        targets[f"{name}_Approach"] = make_target(f"{name}_Approach", pick_appr, "approach")
-        targets[f"{name}_Pick"] = make_target(f"{name}_Pick", pick_pos, "pick")
-        targets[f"{name}_Place_Approach"] = make_target(
-            f"{name}_Place_Approach", place_appr, "approach"
-        )
-        targets[f"{name}_Place"] = make_target(f"{name}_Place", place_pos, "place")
+        label_pick  = f"Gear{size}"
+        label_place = f"ShaftSlot_{size}"
+
+        targets[f"{label_pick}_Approach"] = make_target(f"{label_pick}_Approach", pick_appr,  "approach")
+        targets[f"{label_pick}_Pick"]     = make_target(f"{label_pick}_Pick",     pick_pos,   "pick")
+        targets[f"{label_place}_Approach"]= make_target(f"{label_place}_Approach",place_appr, "approach")
+        targets[f"{label_place}_Place"]   = make_target(f"{label_place}_Place",   place_pos,  "place")
 
     return targets
 
@@ -155,7 +155,7 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
         viewer_options=gs.options.ViewerOptions(
             res=(1280, 720),
             camera_pos=(0.5, -1.6, 1.6),
-            camera_lookat=(FMB_BOARD_X, FMB_BOARD_Y, 0.85),
+            camera_lookat=(0.78, 0.0, 0.85),
         ),
     )
     if not show_viewer and os.getenv("ROBOSKI_GENESIS_BUILD_VISUALIZER", "0") not in {"1", "true", "True"}:
@@ -177,30 +177,33 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
         ),
     )
 
-    # ── FMB teaser board (fixed assembly platform) ────────────────────────────
+    # ── Gear base (fixed assembly platform) ───────────────────────────────────
+    # STL z_min=0 → origin at bottom face centre, sits flush on table at TABLE_H.
     scene.add_entity(
         gs.morphs.Mesh(
-            file=str(FMB_DIR / "teasor_board.stl"),
+            file=str(GEAR_DIR / "gear_base.stl"),
             fixed=True,
-            pos=(FMB_BOARD_X, FMB_BOARD_Y, TABLE_H),
+            pos=(GEAR_BASE_X, GEAR_BASE_Y, TABLE_H),
         ),
         surface=gs.surfaces.Default(color=(0.30, 0.40, 0.60, 1.0)),
     )
 
-    # ── FMB parts (dynamic, staged beside the board) ──────────────────────────
-    def _add_part(name: str, filename: str, color: tuple):
+    # ── Gears (dynamic, in staging area) ─────────────────────────────────────
+    # euler=(-90,0,0): disc lies flat (XY plane), teeth face up.
+    # STL y:[0,25mm] → after rotation z:[-25,0]mm; lift pos_z by GEAR_THICKNESS.
+    def _add_gear(filename: str, color: tuple, stage_x: float):
         return scene.add_entity(
             gs.morphs.Mesh(
-                file=str(FMB_DIR / filename),
-                pos=(FMB_PART_STAGE_X[name], FMB_STAGE_Y, TABLE_H),
+                file=str(GEAR_DIR / filename),
+                pos=(stage_x, STAGE_Y, TABLE_H + GEAR_THICKNESS),
+                euler=(-90, 0, 0),
             ),
             surface=gs.surfaces.Default(color=color),
         )
 
-    part_a_1 = _add_part("Part_A_1", "part_A_1.stl", (0.20, 0.70, 0.80, 1.0))
-    part_a_2 = _add_part("Part_A_2", "part_A_2.stl", (0.65, 0.35, 0.75, 1.0))
-    part_b = _add_part("Part_B", "part_B.stl", (0.90, 0.75, 0.20, 1.0))
-    part_c = _add_part("Part_C", "part_C.stl", (0.85, 0.45, 0.20, 1.0))
+    gear_small  = _add_gear("gear_small.stl",  (0.90, 0.75, 0.20, 1.0), GEAR_STAGE_X["Small"])
+    gear_medium = _add_gear("gear_medium.stl", (0.85, 0.50, 0.15, 1.0), GEAR_STAGE_X["Medium"])
+    gear_large  = _add_gear("gear_large.stl",  (0.75, 0.25, 0.15, 1.0), GEAR_STAGE_X["Large"])
 
     # ── Build + PD init ───────────────────────────────────────────────────────
     scene.build()
@@ -224,12 +227,11 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
         scene=scene,
         robot=robot,
         objects={
-            "Part_A_1": SceneObject("Part_A_1", part_a_1),
-            "Part_A_2": SceneObject("Part_A_2", part_a_2),
-            "Part_B": SceneObject("Part_B", part_b),
-            "Part_C": SceneObject("Part_C", part_c),
+            "Gear_Small_1":  SceneObject("Gear_Small_1",  gear_small),
+            "Gear_Medium_1": SceneObject("Gear_Medium_1", gear_medium),
+            "Gear_Large_1":  SceneObject("Gear_Large_1",  gear_large),
         },
-        targets=_build_fmb_targets(),
+        targets=_build_gear_targets(),
         tools={"Robotiq_2F_85": robot},
         arm_dofs=arm_dofs,
         gripper_dofs=gripper_dofs,
