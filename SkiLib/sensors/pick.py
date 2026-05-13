@@ -40,7 +40,7 @@ def _ctx() -> RobotContext:
 
 
 @tool
-def compute_pick_pose(item_name: str) -> dict:
+def compute_pick_pose(item_name: str, grasp_profile: str = "default") -> dict:
     """Compute a pick pose for a workpiece from its current physics position.
 
     Reads the object's actual position from Genesis and registers two temporary
@@ -57,6 +57,8 @@ def compute_pick_pose(item_name: str) -> dict:
 
     Args:
         item_name: Genesis scene object name (e.g. 'Gear_Large_1').
+        grasp_profile: Symbolic grasp profile, usually "default". Valid values
+            are documented in SkiLib/genesis/assembly.md and validated by code.
 
     Returns:
         {
@@ -66,13 +68,16 @@ def compute_pick_pose(item_name: str) -> dict:
             obj_x:                  float,       # current object X in metres
             obj_y:                  float,       # current object Y in metres
             obj_z:                  float,       # current object Z in metres
+            object_yaw_deg:         float | None,
+            grasp_profile:          str | None,
+            tcp_yaw_deg:            float | None,
             tilt_angle_deg:         float | None,
             is_pickable:            bool,
             description:            str,
         }
     """
     try:
-        return _ctx().compute_pick_pose(item_name)
+        return _ctx().compute_pick_pose(item_name, grasp_profile)
     except KeyError as e:
         logger.warning("compute_pick_pose: object not found — %s", e)
         return {

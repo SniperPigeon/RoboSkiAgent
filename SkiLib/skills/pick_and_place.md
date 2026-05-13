@@ -41,6 +41,12 @@ parameters:
     default: "MoveL"
     enum: ["MoveJ", "MoveL"]
     description: "Motion primitive for the initial move to home_position. MoveL is recommended."
+  grasp_profile:
+    type: str
+    required: false
+    default: "default"
+    enum: ["default", "short_edge", "long_edge"]
+    description: "Symbolic grasp profile from assembly.md. Default uses the per-part code-defined profile; never pass numeric yaw."
 
 required_primitives: [MoveJ, MoveL, Grasp, Release]
 ---
@@ -51,8 +57,14 @@ required_primitives: [MoveJ, MoveL, Grasp, Release]
 Move a workpiece from a pick location to a place location using a structured
 approach → grasp → transit → place → retract sequence.
 
-All target parameters are RoboDK symbolic names (strings visible in the RoboDK
-station item tree). **NEVER pass coordinates or matrix values as target names.**
+All target parameters are Genesis symbolic names. **NEVER pass coordinates,
+matrix values, joint angles, or numeric yaw values as target names.**
+
+The optional `grasp_profile` is a symbolic clamp mode from
+`SkiLib/genesis/assembly.md`. It is informational on the nominal path because
+the static target names already encode the default TCP yaw. During dynamic
+re-pick recovery, pass it to `compute_pick_pose()` so the fresh targets use the
+same clamp convention.
 
 ## Standard Execution Sequence
 
@@ -107,8 +119,8 @@ Apply these hints **before** calling `escalate_to_hitl`.
   - If the item has been released but is displaced: the workpiece must be re-picked.
     The gear may no longer be at the original staging position, so do **not** reuse
     the static `pick_approach` / `pick_target` names.  Instead:
-    1. Call `compute_pick_pose(item_name=<item>)` to get the current object position
-       and register fresh temporary targets.
+    1. Call `compute_pick_pose(item_name=<item>, grasp_profile=<grasp_profile>)`
+       to get the current object position and register fresh temporary targets.
     2. Check `is_pickable` in the result.  If False (gear tilted), call
        `escalate_to_hitl` immediately.
     3. Use `approach_target_name` and `pick_target_name` from the result with MoveL
@@ -136,10 +148,11 @@ Apply these hints **before** calling `escalate_to_hitl`.
   - XY distance to nearest place target ≤ `PLACEMENT_XY_TOL_M` (default 5 mm,
     tight enough to distinguish 40 mm-spaced shaft slots)
   - Z offset from expected resting height ≤ `PLACEMENT_Z_TOL_M` (default 5 mm;
-    expected Z = place_target_tcp_z − TCP_OFFSET_Z ≈ 0.7575 m for all gears)
-  - Disc tilt from horizontal ≤ `PLACEMENT_TILT_TOL_DEG` (default 15°; computed
-    by rotating the gear's local Y axis — the STL disc normal — by the current
-    world quaternion and taking the angle from +Z)
+    expected Z is derived from the place target TCP height minus the configured
+    gripper offset and grasp height)
+  - Part tilt from horizontal ≤ `PLACEMENT_TILT_TOL_DEG` (default 8°; computed
+    by rotating the part's local Z axis by the current world quaternion and
+    taking the angle from world +Z)
 - `tilt_angle_deg` in the return dict is `None` if Genesis cannot expose `get_quat()`
   on the entity; in that case the tilt check is skipped (fail open).
 - `description` always shows all three metrics, making recovery diagnosis straightforward.

@@ -180,6 +180,9 @@ class MoveL(BasePrimitive):
                 pos=tuple(float(v) for v in pos),
                 quat=target.pose.quat,
                 kind=target.pose.kind,
+                yaw_deg=target.pose.yaw_deg,
+                tcp_yaw_deg=target.pose.tcp_yaw_deg,
+                expected_object_yaw_deg=target.pose.expected_object_yaw_deg,
             )
             ik = solve_ik(self.runtime, waypoint, init_qpos=qpos_seed)
             if not ik.success or ik.qpos is None:

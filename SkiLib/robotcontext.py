@@ -104,8 +104,8 @@ class RobotContext:
     def get_object_position(self, name: str) -> dict:
         return self.runtime.get_object_position(name)
 
-    def compute_pick_pose(self, name: str) -> dict:
-        return self.runtime.compute_pick_pose(name)
+    def compute_pick_pose(self, name: str, grasp_profile: str | None = None) -> dict:
+        return self.runtime.compute_pick_pose(name, grasp_profile)
 
 
 class PrimitiveRegistry:

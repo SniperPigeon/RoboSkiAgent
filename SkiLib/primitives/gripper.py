@@ -14,6 +14,7 @@ from SkiLib.genesis.scene import (
     FMB_PART_HEIGHT,
     FMB_PART_REF_Z_FROM_BOTTOM,
     TCP_OFFSET_Z,
+    fmb_grasp_z_from_bottom,
 )
 from SkiLib.genesis.types import SceneObject
 
@@ -53,7 +54,11 @@ class Grasp(BasePrimitive):
             ref_z_from_bottom = FMB_PART_REF_Z_FROM_BOTTOM.get(expected_item.name)
             if part_height is not None and ref_z_from_bottom is not None:
                 expected_tcp_pos = obj_pos.copy()
-                expected_tcp_pos[2] += part_height / 2 - ref_z_from_bottom + TCP_OFFSET_Z
+                expected_tcp_pos[2] += (
+                    fmb_grasp_z_from_bottom(expected_item.name, part_height)
+                    - ref_z_from_bottom
+                    + TCP_OFFSET_Z
+                )
             else:
                 expected_tcp_pos = obj_pos
             dist = float(np.linalg.norm(tcp_pos - expected_tcp_pos))

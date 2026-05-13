@@ -11,6 +11,7 @@ Rules:
 import os
 from langchain_core.tools import tool
 
+from SkiLib.genesis.assembly_specs import ASSEMBLY_SEQUENCE, assembly_spec_for
 from SkiLib.robotcontext import RobotContext
 
 
@@ -67,6 +68,36 @@ def get_gripper_state() -> dict:
     return _ctx().get_gripper_state()
 
 
+@tool
+def list_assembly_recipe() -> dict:
+    """Return the default symbolic assembly order and grasp profile symbols.
+
+    This exposes only symbols, not coordinates or numeric yaw values. Use it
+    when the operator asks for the default assembly without listing every part.
+    """
+    steps = []
+    for item in ASSEMBLY_SEQUENCE:
+        spec = assembly_spec_for(item)
+        steps.append({
+            "item": item,
+            "home_position": "Home_position",
+            "pick_approach": f"{item}_Approach",
+            "pick_target": f"{item}_Pick",
+            "place_approach": f"{item}_Place_Approach",
+            "place_target": spec.place_target,
+            "default_grasp_profile": spec.default_grasp_profile,
+            "available_grasp_profiles": sorted(spec.grasp_profiles),
+        })
+    return {"assembly_order": list(ASSEMBLY_SEQUENCE), "steps": steps}
+
+
 def get_tools() -> list:
     """Return all informative T-skills as a list for LLM tool binding."""
-    return [list_targets, list_objects, list_tools, check_item_exists, get_gripper_state]
+    return [
+        list_targets,
+        list_objects,
+        list_tools,
+        check_item_exists,
+        get_gripper_state,
+        list_assembly_recipe,
+    ]

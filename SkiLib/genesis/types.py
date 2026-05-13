@@ -16,8 +16,10 @@ class TargetPose:
     quat: tuple[float, float, float, float]
     kind: TargetKind
     # TCP yaw used by motion planning. For place targets this may differ from
-    # the final object yaw because grasp preserves the object-to-TCP transform.
+    # the final object yaw because the selected grasp profile defines an
+    # object-to-TCP yaw offset.
     yaw_deg: float | None = None
+    tcp_yaw_deg: float | None = None
     expected_object_yaw_deg: float | None = None
 
 

@@ -12,14 +12,18 @@ from SkiLib.genesis.config import (
     PLACEMENT_YAW_TOL_DEG,
     PLACEMENT_Z_TOL_M,
 )
+from SkiLib.genesis.assembly_specs import (
+    grasp_profile_for,
+    tcp_yaw_for_object_yaw,
+)
 from SkiLib.genesis.scene import (
     APPROACH_CLEARANCE,
-    FMB_PICK_YAW_DEG,
     FMB_PART_HEIGHT,
     FMB_PART_REF_Z_FROM_BOTTOM,
     GEAR_THICKNESS,
     TCP_OFFSET_Z,
     build_genesis_scene, make_target,
+    fmb_grasp_z_from_bottom,
 )
 from SkiLib.genesis.types import GenesisSceneBundle, SceneObject, SceneTarget
 
@@ -123,7 +127,7 @@ class GenesisRuntime:
             "grasped": [self.held_item_name] if self.held_item_name else [],
         }
 
-    def compute_pick_pose(self, name: str) -> dict:
+    def compute_pick_pose(self, name: str, grasp_profile: str | None = None) -> dict:
         """Compute a valid TCP pick pose from the object's current physics position.
 
         Reads entity.get_pos() and tilt, then registers two temporary scene targets:
@@ -143,7 +147,31 @@ class GenesisRuntime:
 
         tilt_deg   = self._disc_tilt_deg(obj.entity)
         yaw_deg = self._entity_yaw_deg(obj.entity)
-        grasp_yaw_deg = FMB_PICK_YAW_DEG.get(name, yaw_deg or 0.0)
+        object_yaw_for_grasp = yaw_deg or 0.0
+        try:
+            profile = grasp_profile_for(name, grasp_profile)
+        except KeyError as exc:
+            return {
+                "item": name,
+                "pick_target_name": None,
+                "approach_target_name": None,
+                "obj_x": round(float(pos[0]), 4),
+                "obj_y": round(float(pos[1]), 4),
+                "obj_z": round(float(pos[2]), 4),
+                "yaw_angle_deg": round(yaw_deg, 1) if yaw_deg is not None else None,
+                "object_yaw_deg": round(yaw_deg, 1) if yaw_deg is not None else None,
+                "grasp_profile": grasp_profile,
+                "tcp_yaw_deg": None,
+                "tilt_angle_deg": round(tilt_deg, 1) if tilt_deg is not None else None,
+                "is_pickable": False,
+                "description": str(exc),
+            }
+        grasp_profile_symbol = profile.symbol
+        grasp_yaw_deg = tcp_yaw_for_object_yaw(
+            name,
+            object_yaw_for_grasp,
+            grasp_profile_symbol,
+        )
         is_pickable = (tilt_deg is None) or (tilt_deg <= PLACEMENT_TILT_TOL_DEG)
 
         pick_name     = f"Dynamic_Pick_{name}"
@@ -154,7 +182,7 @@ class GenesisRuntime:
             ref_z_from_bottom = FMB_PART_REF_Z_FROM_BOTTOM.get(name, part_height / 2)
             pick_tcp_z = (
                 float(pos[2])
-                + (part_height / 2 - ref_z_from_bottom)
+                + (fmb_grasp_z_from_bottom(name, part_height) - ref_z_from_bottom)
                 + TCP_OFFSET_Z
             )
             approach_tcp_z = pick_tcp_z + APPROACH_CLEARANCE
@@ -178,7 +206,8 @@ class GenesisRuntime:
         if is_pickable:
             desc = (
                 f"'{name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) m, "
-                f"yaw {yaw_str}, grasp yaw {grasp_yaw_deg:.1f}°, tilt {tilt_str}. "
+                f"object yaw {yaw_str}, grasp profile '{grasp_profile_symbol}', "
+                f"TCP yaw {grasp_yaw_deg:.1f}°, tilt {tilt_str}. "
                 f"Targets registered: '{pick_name}', '{approach_name}'."
             )
         else:
@@ -195,6 +224,9 @@ class GenesisRuntime:
             "obj_y":       round(float(pos[1]), 4),
             "obj_z":       round(float(pos[2]), 4),
             "yaw_angle_deg": round(yaw_deg, 1) if yaw_deg is not None else None,
+            "object_yaw_deg": round(yaw_deg, 1) if yaw_deg is not None else None,
+            "grasp_profile": grasp_profile_symbol if is_pickable else None,
+            "tcp_yaw_deg": round(grasp_yaw_deg, 1) if is_pickable else None,
             "tilt_angle_deg": round(tilt_deg, 1) if tilt_deg is not None else None,
             "is_pickable": is_pickable,
             "description": desc,
@@ -242,9 +274,10 @@ class GenesisRuntime:
         """Snap a nearly placed FMB object to its semantic assembly pose.
 
         Genesis mesh contacts are too coarse for tight insertion. This helper is
-        intentionally conservative: it only snaps when the object is already
-        close to its own place target in XY/yaw, preserving genuine placement
-        failures for recovery.
+        intentionally conservative about position: it only snaps when the
+        object is already close to its own place target in XY/Z, preserving
+        genuine placement failures for recovery. Yaw/tilt are corrected by the
+        snap and are reported for diagnostics, but they do not block snapping.
         """
         target_name = f"{name}_Place"
         target = self.bundle.targets.get(target_name)
@@ -261,7 +294,7 @@ class GenesisRuntime:
 
         part_height = FMB_PART_HEIGHT.get(name, GEAR_THICKNESS)
         ref_z_from_bottom = FMB_PART_REF_Z_FROM_BOTTOM.get(name, part_height / 2)
-        bottom_z = target.pose.pos[2] - TCP_OFFSET_Z - part_height / 2
+        bottom_z = target.pose.pos[2] - TCP_OFFSET_Z - fmb_grasp_z_from_bottom(name, part_height)
         expected_z = bottom_z + ref_z_from_bottom
         z_err = float(abs(pos[2] - expected_z))
 
@@ -275,15 +308,10 @@ class GenesisRuntime:
         tilt_deg = self._disc_tilt_deg(obj.entity)
         tilt_err = float(tilt_deg or 0.0)
 
-        if (
-            xy_dist > max_xy_dist
-            or z_err > max_z_err
-            or yaw_err > max_yaw_err_deg
-            or tilt_err > max_tilt_deg
-        ):
+        if xy_dist > max_xy_dist or z_err > max_z_err:
             return {
                 "snapped": False,
-                "reason": "outside_snap_window",
+                "reason": "outside_position_snap_window",
                 "xy_distance_m": round(xy_dist, 4),
                 "z_error_m": round(z_err, 4),
                 "yaw_error_deg": round(yaw_err, 1),
@@ -291,8 +319,8 @@ class GenesisRuntime:
                 "limits": {
                     "max_xy_dist_m": max_xy_dist,
                     "max_z_err_m": max_z_err,
-                    "max_yaw_err_deg": max_yaw_err_deg,
-                    "max_tilt_deg": max_tilt_deg,
+                    "max_yaw_err_deg_report_only": max_yaw_err_deg,
+                    "max_tilt_deg_report_only": max_tilt_deg,
                 },
             }
 
@@ -351,7 +379,8 @@ class GenesisRuntime:
 
         Checks XY proximity, Z height, AND disc tilt to detect misplaced gears:
         - XY tolerance:   PLACEMENT_XY_TOL_M  (distinguishes 40 mm-spaced shaft slots)
-        - Z tolerance:    PLACEMENT_Z_TOL_M   (expected_z = place_tcp_z - TCP_OFFSET_Z)
+        - Z tolerance:    PLACEMENT_Z_TOL_M   (expected_z is derived from
+          place_tcp_z minus the gripper offset and configured grasp height)
         - Tilt tolerance: PLACEMENT_TILT_TOL_DEG  (disc normal vs world +Z)
 
         Thread-safe read — no physics mutation.
@@ -391,7 +420,11 @@ class GenesisRuntime:
             target_ref_z_from_bottom = FMB_PART_REF_Z_FROM_BOTTOM.get(
                 target_item, target_height / 2
             )
-            expected_bottom_z = target.pose.pos[2] - TCP_OFFSET_Z - target_height / 2
+            expected_bottom_z = (
+                target.pose.pos[2]
+                - TCP_OFFSET_Z
+                - fmb_grasp_z_from_bottom(target_item, target_height)
+            )
             expected_z = expected_bottom_z + target_ref_z_from_bottom
             z_err  = float(abs(pos[2] - expected_z))
             xy_ok  = nearest_dist <= PLACEMENT_XY_TOL_M
