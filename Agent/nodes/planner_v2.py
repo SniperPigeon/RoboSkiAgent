@@ -20,10 +20,11 @@ Node signature is identical to planner():
 
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+import os
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -35,11 +36,19 @@ from SkiLib.skill_loader import SkillMdLoader
 logger = get_logger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_ASSEMBLY_REFERENCE = Path(__file__).resolve().parents[2] / "SkiLib" / "genesis" / "assembly.md"
 
 
 def _load_prompt(name: str) -> str:
     """Load a prompt file as a plain string."""
     return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
+
+
+def _load_assembly_reference() -> str:
+    try:
+        return _ASSEMBLY_REFERENCE.read_text(encoding="utf-8")
+    except OSError:
+        return "(assembly reference unavailable)"
 
 
 # Injection prompt, can be set via context var, used by Automated Prompt Optimization by Agent-Lightning
@@ -140,6 +149,22 @@ def _build_skill_reference() -> str:
     return "\n".join(lines)
 
 
+def _invoke_with_timeout(llm_with_tools, messages: list, timeout: float, *, turn: int | None = None):
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(llm_with_tools.invoke, messages)
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeout:
+        pool.shutdown(wait=False)
+        if turn is None:
+            logger.error("[planner_v2] LLM timed out after %ss", timeout)
+        else:
+            logger.error("[planner_v2] LLM timed out after %ss on turn %d", timeout, turn)
+        raise
+    finally:
+        pool.shutdown(wait=False)
+
+
 # ---------------------------------------------------------------------------
 # Node function
 # ---------------------------------------------------------------------------
@@ -174,37 +199,67 @@ def planner_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
         "Use ONLY the skills listed below.  Each skill will be executed by a robot "
         "sub-agent that sequences the required primitives — you do not need to specify "
         "individual MoveL/Grasp steps, only the skill-level parameters.\n\n"
-        f"{skill_ref}"
+        f"{skill_ref}\n\n"
+        "## Assembly Reference\n\n"
+        f"{_load_assembly_reference()}"
     )
 
-    # Call LLM once and execute tool_calls sequentially to preserve generation order.
-    # create_agent's ToolNode executes all calls in a single AIMessage in parallel,
-    # causing non-deterministic task ordering with models that batch tool calls.
     tool_map = {t.name: t for t in tools}
     llm_with_tools = llm.bind_tools(tools)
 
     sup_content = state["messages"][-1].content
     messages    = [SystemMessage(content=system_prompt), HumanMessage(content=sup_content)]
     timeout     = get_node_timeouts()["planner"]
+    provider    = os.getenv("ROBOSKI_LLM_PROVIDER", "claude").lower()
 
-    pool   = ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(llm_with_tools.invoke, messages)
-    try:
-        ai_msg = future.result(timeout=timeout)
-    except FuturesTimeout:
-        pool.shutdown(wait=False)
-        logger.error("[planner_v2] LLM timed out after %ss", timeout)
-        return {
-            "todo_list": [],
-            "execution_log": [f"[planner_v2] TIMEOUT after {timeout}s — plan aborted"],
-        }
-    finally:
-        pool.shutdown(wait=False)
+    # Claude often emits only one tool call per assistant turn.  For it, keep
+    # feeding tool results back until the model stops requesting tools.
+    if provider == "claude":
+        max_turns = 20
+        for turn in range(1, max_turns + 1):
+            try:
+                ai_msg = _invoke_with_timeout(llm_with_tools, messages, timeout, turn=turn)
+            except FuturesTimeout:
+                return {
+                    "todo_list": [],
+                    "execution_log": [f"[planner_v2] TIMEOUT after {timeout}s — plan aborted"],
+                }
 
-    for tc in getattr(ai_msg, "tool_calls", []):
-        tool = tool_map.get(tc["name"])
-        if tool is not None:
-            tool.invoke(tc["args"])
+            messages.append(ai_msg)
+            tool_calls = getattr(ai_msg, "tool_calls", []) or []
+            if not tool_calls:
+                break
+
+            logger.debug("[planner_v2] turn=%d, tool_calls=%d", turn, len(tool_calls))
+            for tc in tool_calls:
+                tool = tool_map.get(tc["name"])
+                if tool is None:
+                    result = f"Unknown planner tool: {tc['name']}"
+                else:
+                    result = tool.invoke(tc["args"])
+
+                messages.append(ToolMessage(
+                    content=str(result),
+                    tool_call_id=tc.get("id", tc["name"]),
+                ))
+        else:
+            logger.warning("[planner_v2] Reached max planner turns (%d)", max_turns)
+
+    # Local llama.cpp keeps the original planner_v2 behaviour: one model call,
+    # then execute whatever tool calls the model batched into that response.
+    else:
+        try:
+            ai_msg = _invoke_with_timeout(llm_with_tools, messages, timeout)
+        except FuturesTimeout:
+            return {
+                "todo_list": [],
+                "execution_log": [f"[planner_v2] TIMEOUT after {timeout}s — plan aborted"],
+            }
+
+        for tc in getattr(ai_msg, "tool_calls", []):
+            tool = tool_map.get(tc["name"])
+            if tool is not None:
+                tool.invoke(tc["args"])
 
     manual_count = sum(1 for t in plan if t["type"] == "manual")
     logger.info("[planner_v2] Done: %d tasks (%d manual)", len(plan), manual_count)

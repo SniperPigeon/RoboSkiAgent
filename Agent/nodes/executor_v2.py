@@ -24,12 +24,13 @@ Design
 import json
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field, create_model
 
@@ -44,10 +45,18 @@ from SkiLib.skill_loader import SkillMdLoader
 logger = get_logger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_ASSEMBLY_REFERENCE = Path(__file__).resolve().parents[2] / "SkiLib" / "genesis" / "assembly.md"
 
 
 def _load_prompt(name: str) -> str:
     return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
+
+
+def _load_assembly_reference() -> str:
+    try:
+        return _ASSEMBLY_REFERENCE.read_text(encoding="utf-8")
+    except OSError:
+        return "(assembly reference unavailable)"
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +76,41 @@ class ExecutionStep(BaseModel):
     check_field:    Optional[str]   = None
     check_expected: Optional[bool]  = None
     on_fail:        str             = "llm_recovery"
+
+
+class PlanStepInput(BaseModel):
+    type:           Literal["action", "check"] = Field(
+        description="'action' for primitive execution, 'check' for sensor verification."
+    )
+    description:    str = Field(description="Short label for this step.")
+    primitive:      Optional[str] = Field(
+        default=None,
+        description="Primitive name for action steps, e.g. MoveJ, MoveL, Grasp, Release.",
+    )
+    args:           Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Primitive arguments for action steps.",
+    )
+    sensor:         Optional[str] = Field(
+        default=None,
+        description="Sensor tool name for check steps.",
+    )
+    sensor_args:    Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Sensor arguments for check steps.",
+    )
+    check_field:    Optional[str] = Field(
+        default=None,
+        description="Boolean field in the sensor result to compare.",
+    )
+    check_expected: Optional[bool] = Field(
+        default=None,
+        description="Expected boolean value for check_field.",
+    )
+    on_fail:        str = Field(
+        default="llm_recovery",
+        description="'llm_recovery' or 'escalate_hitl'.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +135,64 @@ def _make_plan_tools(
         return len(steps) + 1
 
     tools: list[StructuredTool] = []
+    primitive_names = {tool.name for tool in primitive_tools}
+    sensor_names = {tool.name for tool in sensor_tools}
+
+    class RegisterExecutionPlanSchema(BaseModel):
+        plan_steps: List[PlanStepInput] = Field(
+            description=(
+                "The complete execution plan in strict order. Each item is either "
+                "an action step with primitive/args or a check step with sensor fields."
+            )
+        )
+
+    def _register_execution_plan(plan_steps: List[PlanStepInput]) -> str:
+        new_steps: list[ExecutionStep] = []
+        for idx, raw in enumerate(plan_steps, start=1):
+            if raw.type == "action":
+                if not raw.primitive:
+                    return f"Plan rejected: action step {idx} is missing primitive."
+                if raw.primitive not in primitive_names:
+                    return f"Plan rejected: unknown primitive '{raw.primitive}' at step {idx}."
+                new_steps.append(ExecutionStep(
+                    step_id=idx,
+                    type="action",
+                    description=raw.description,
+                    primitive=raw.primitive,
+                    args=raw.args,
+                ))
+            else:
+                if not raw.sensor:
+                    return f"Plan rejected: check step {idx} is missing sensor."
+                if raw.sensor not in sensor_names:
+                    return f"Plan rejected: unknown sensor '{raw.sensor}' at step {idx}."
+                if raw.check_field is None or raw.check_expected is None:
+                    return f"Plan rejected: check step {idx} is missing check_field/check_expected."
+                new_steps.append(ExecutionStep(
+                    step_id=idx,
+                    type="check",
+                    description=raw.description,
+                    sensor=raw.sensor,
+                    sensor_args=raw.sensor_args,
+                    check_field=raw.check_field,
+                    check_expected=raw.check_expected,
+                    on_fail=raw.on_fail,
+                ))
+
+        steps.clear()
+        steps.extend(new_steps)
+        return f"Registered complete execution plan with {len(steps)} step(s)."
+
+    tools.append(StructuredTool.from_function(
+        func=_register_execution_plan,
+        name="register_execution_plan",
+        description=(
+            "Preferred tool: register the entire execution plan in one call. "
+            "Use this instead of calling add_<PrimitiveName>_step and "
+            "add_<SensorName>_check one by one."
+        ),
+        args_schema=RegisterExecutionPlanSchema,
+    ))
 
     # ---- Action step tools — one per primitive --------------------------------
     for prim_tool in primitive_tools:
@@ -206,6 +308,22 @@ def _make_plan_tools(
     return tools, steps
 
 
+def _invoke_with_timeout(llm_with_tools, messages: list, timeout: float, *, phase: str, turn: int | None = None):
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(llm_with_tools.invoke, messages)
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeout:
+        pool.shutdown(wait=False)
+        if turn is None:
+            logger.error("[executor_v2] %s LLM timed out after %ss", phase, timeout)
+        else:
+            logger.error("[executor_v2] %s LLM timed out after %ss on turn %d", phase, timeout, turn)
+        raise
+    finally:
+        pool.shutdown(wait=False)
+
+
 # ---------------------------------------------------------------------------
 # Planning prompt
 # ---------------------------------------------------------------------------
@@ -213,6 +331,7 @@ def _make_plan_tools(
 def _build_planning_prompt(
     skill_name: str, skill_body: str, params: dict,
     scene_tools: list[str] | None = None,
+    retry_context_text: str = "",
 ) -> str:
     base        = _load_prompt("execution_planner.txt")
     param_lines = "\n".join(f"- `{k}` = `{v}`" for k, v in params.items())
@@ -220,6 +339,8 @@ def _build_planning_prompt(
         f"{base}\n\n"
         f"## Skill: {skill_name}\n\n"
         f"{skill_body}\n\n"
+        "## Assembly Reference\n\n"
+        f"{_load_assembly_reference()}\n\n"
         "## Concrete Parameter Values\n\n"
         f"{param_lines}"
     )
@@ -230,6 +351,11 @@ def _build_planning_prompt(
             "Use one of these exact names for `tool_name` parameters, "
             "or leave `tool_name` empty to use the currently active tool:\n\n"
             f"{tool_lines}"
+        )
+    if retry_context_text:
+        prompt += (
+            "\n\n## HITL Retry Background\n\n"
+            f"{retry_context_text}"
         )
     return prompt
 
@@ -291,6 +417,8 @@ def _run_plan(
                 logger.warning("[executor_v2] Step %d CHECK FAILED: %s.%s expected=%s got=%s",
                                step.step_id, step.sensor, step.check_field,
                                step.check_expected, sensor_result.get(step.check_field))
+                if isinstance(sensor_result, dict) and sensor_result.get("description"):
+                    logger.warning("[executor_v2] Check detail: %s", sensor_result["description"])
                 return False, step, sensor_result
 
         else:
@@ -298,6 +426,114 @@ def _run_plan(
                            step.type, step.step_id)
 
     return True, None, None
+
+
+def _failure_info_json(failure_info: Any) -> str:
+    payload = (
+        failure_info.to_llm_message()
+        if isinstance(failure_info, SkillResult)
+        else failure_info
+    )
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+
+
+def _make_retry_context(
+    *,
+    task: dict,
+    skill_name: str,
+    steps: list[ExecutionStep],
+    failed_step: ExecutionStep,
+    failure_info: Any,
+    recovery_conclusion: Any | None = None,
+) -> dict:
+    ctx = {
+        "task_id": task.get("task_id"),
+        "skill": skill_name,
+        "params": task.get("params", {}),
+        "planned_steps": [s.model_dump() for s in steps],
+        "failed_step_id": failed_step.step_id,
+        "failed_step_description": failed_step.description,
+        "failure_info": (
+            failure_info.to_llm_message()
+            if isinstance(failure_info, SkillResult)
+            else failure_info
+        ),
+    }
+    if recovery_conclusion is not None:
+        ctx["recovery_conclusion"] = recovery_conclusion
+    return ctx
+
+
+def _summarize_agent_result(result: Any) -> dict:
+    """Extract a compact recovery-agent conclusion for later HITL retry prompts."""
+    if not isinstance(result, dict):
+        return {"result": str(result)}
+
+    messages = result.get("messages") or []
+    tail = []
+    for msg in messages[-6:]:
+        content = getattr(msg, "content", None)
+        if content:
+            tail.append(str(content))
+    return {
+        "final_messages": tail,
+    }
+
+
+def _format_retry_context(
+    task: dict,
+    retry_context: dict | None,
+) -> str:
+    if not retry_context or retry_context.get("task_id") != task.get("task_id"):
+        return ""
+
+    raw_steps = retry_context.get("planned_steps") or []
+    failed_id = int(retry_context.get("failed_step_id") or 0)
+    try:
+        previous_steps = [ExecutionStep.model_validate(step) for step in raw_steps]
+        plan_lines = "\n".join(_format_step(step, failed_id) for step in previous_steps)
+    except Exception:
+        plan_lines = json.dumps(raw_steps, ensure_ascii=False, indent=2, default=str)
+
+    failure_text = json.dumps(
+        retry_context.get("failure_info"),
+        ensure_ascii=False,
+        indent=2,
+        default=str,
+    )
+    recovery_conclusion = retry_context.get("recovery_conclusion")
+    recovery_text = (
+        json.dumps(recovery_conclusion, ensure_ascii=False, indent=2, default=str)
+        if recovery_conclusion is not None
+        else ""
+    )
+    completed = [step for step in raw_steps if int(step.get("step_id", 0)) < failed_id]
+    return (
+        "This executor call is a HITL retry for the same task. The previous "
+        "attempt partially executed before failing. Treat the following as "
+        "background context, not as a mandatory script: decide the correct "
+        "recovery/resume plan using the skill guide and current robot state.\n\n"
+        f"Previously failed step: {failed_id} — "
+        f"{retry_context.get('failed_step_description', 'unknown')}\n\n"
+        f"Completed step ids before failure: {[step.get('step_id') for step in completed]}\n\n"
+        "Previous execution plan:\n"
+        f"{plan_lines}\n\n"
+        "Previous failure result:\n"
+        f"```json\n{failure_text}\n```\n\n"
+        + (
+            "Recovery agent conclusion from the previous attempt:\n"
+            f"```json\n{recovery_text}\n```\n\n"
+            if recovery_text
+            else ""
+        )
+        + "Important retry rules:\n"
+        "- Do not blindly restart from step 1.\n"
+        "- First register checks needed to establish current state, especially "
+        "`get_attachment_state` / `is_item_grasped` when the prior attempt may "
+        "have already grasped the item.\n"
+        "- Resume from the earliest still-needed step. Repeating completed "
+        "steps is allowed only when the current state proves it is necessary.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +577,8 @@ def _build_recovery_prompt(
         f"{base}\n\n"
         f"## Skill: {skill_name}\n\n"
         f"{skill_body}\n\n"
+        "## Assembly Reference\n\n"
+        f"{_load_assembly_reference()}\n\n"
         "## Concrete Parameter Values\n\n"
         f"{param_lines}\n\n"
         "## Full Execution Plan\n\n"
@@ -379,6 +617,7 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     tid        = task.get("task_id", "?")
     skill_name = task.get("skill", "")
     params     = task.get("params", {})
+    retry_context = state.get("retry_context") or {}
 
     # ---- Halt guard -----------------------------------------------------------
     if state.get("halt_flag"):
@@ -436,32 +675,44 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     sensor_by_name          = {t.name: t for t in sensor_tools}
 
     # ---- Phase 1: generate execution plan via tool calls (LLM) ----------------
-    # We call the LLM once and execute its tool_calls sequentially ourselves
-    # instead of delegating to create_agent's ToolNode, which runs all calls in
-    # a single AIMessage in parallel and causes non-deterministic step ordering.
+    # We execute tool calls sequentially ourselves instead of delegating to
+    # create_agent's ToolNode, which can run all calls in one AIMessage in
+    # parallel and cause non-deterministic step ordering.
     logger.info("[executor_v2] Generating plan for %s(%s)", skill_name, params)
     plan_tools, steps = _make_plan_tools(primitive_tools, sensor_tools)
     plan_tools_by_name = {t.name: t for t in plan_tools}
     from SkiLib.metatools.informative import list_tools
     scene_tools   = list_tools.invoke({})
-    system_prompt = _build_planning_prompt(skill_name, spec.body, params, scene_tools=scene_tools)
+    retry_context_text = _format_retry_context(task, retry_context)
+    if retry_context_text:
+        logger.info("[executor_v2] Injecting HITL retry context for %s into planning prompt", tid)
+    system_prompt = _build_planning_prompt(
+        skill_name,
+        spec.body,
+        params,
+        scene_tools=scene_tools,
+        retry_context_text=retry_context_text,
+    )
 
     timeouts  = get_node_timeouts()
     plan_llm  = llm.bind_tools(plan_tools)
+    provider  = os.getenv("ROBOSKI_LLM_PROVIDER", "claude").lower()
     messages  = [
         HumanMessage(content=system_prompt),
         HumanMessage(content=(
             f"Build the execution plan for the {skill_name} skill now. "
-            "Register every step and check in order using the provided tools."
+            "Register every step and check in order using the provided tools. "
+            + (
+                "This is a HITL retry: use the retry background to decide the "
+                "correct recovery/resume plan instead of blindly replaying the "
+                "nominal sequence."
+                if retry_context_text
+                else ""
+            )
         )),
     ]
-    pool_plan = ThreadPoolExecutor(max_workers=1)
-    future    = pool_plan.submit(plan_llm.invoke, messages)
-    try:
-        ai_msg = future.result(timeout=timeouts["executor_plan"])
-    except FuturesTimeout:
-        pool_plan.shutdown(wait=False)
-        logger.error("[executor_v2] Plan LLM timed out after %ss for %s", timeouts["executor_plan"], tid)
+
+    def _plan_timeout_result() -> dict:
         return {
             "execution_log": [f"[executor_v2] {tid} PLAN TIMEOUT after {timeouts['executor_plan']}s"],
             "last_result": SkillResult(
@@ -475,13 +726,61 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
             "halt_flag":   True,
             "halt_reason": "TASK_FAILURE",
         }
-    finally:
-        pool_plan.shutdown(wait=False)
 
-    for tc in getattr(ai_msg, "tool_calls", []):
-        tool = plan_tools_by_name.get(tc["name"])
-        if tool is not None:
-            tool.invoke(tc["args"])
+    if provider == "claude":
+        max_turns = 30
+        for turn in range(1, max_turns + 1):
+            try:
+                ai_msg = _invoke_with_timeout(
+                    plan_llm, messages, timeouts["executor_plan"],
+                    phase=f"Plan for {tid}", turn=turn,
+                )
+            except FuturesTimeout:
+                return _plan_timeout_result()
+
+            messages.append(ai_msg)
+            tool_calls = getattr(ai_msg, "tool_calls", []) or []
+            if not tool_calls:
+                break
+
+            logger.debug("[executor_v2] plan turn=%d, tool_calls=%d", turn, len(tool_calls))
+            complete_plan_registered = False
+            for tc in tool_calls:
+                tool = plan_tools_by_name.get(tc["name"])
+                if tool is None:
+                    result = f"Unknown execution planning tool: {tc['name']}"
+                else:
+                    result = tool.invoke(tc["args"])
+                    if tc["name"] == "register_execution_plan" and str(result).startswith("Registered complete"):
+                        complete_plan_registered = True
+
+                messages.append(ToolMessage(
+                    content=str(result),
+                    tool_call_id=tc.get("id", tc["name"]),
+                ))
+
+            if complete_plan_registered:
+                break
+
+            messages.append(HumanMessage(content=(
+                "Continue registering any remaining execution-plan steps and checks "
+                "in order. If the full plan has already been registered, stop calling tools."
+            )))
+        else:
+            logger.warning("[executor_v2] Reached max plan turns (%d) for %s", max_turns, tid)
+    else:
+        try:
+            ai_msg = _invoke_with_timeout(
+                plan_llm, messages, timeouts["executor_plan"],
+                phase=f"Plan for {tid}",
+            )
+        except FuturesTimeout:
+            return _plan_timeout_result()
+
+        for tc in getattr(ai_msg, "tool_calls", []):
+            tool = plan_tools_by_name.get(tc["name"])
+            if tool is not None:
+                tool.invoke(tc["args"])
 
     if not steps:
         logger.error("[executor_v2] Plan agent produced no steps for %s", skill_name)
@@ -518,6 +817,7 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
                 message=f"{skill_name} completed by plan executor.",
             ),
             "current_task": {},
+            "retry_context": None,
             "planned_steps": _planned_steps,
             "recovered":     False,
         }
@@ -545,6 +845,17 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
             "halt_flag":   True,
             "halt_reason": "TASK_FAILURE",
             "planned_steps": _planned_steps,
+            "retry_context": _make_retry_context(
+                task=task,
+                skill_name=skill_name,
+                steps=steps,
+                failed_step=failed_step,  # type: ignore[arg-type]
+                failure_info=failure_info,
+                recovery_conclusion={
+                    "status": "not_run",
+                    "message": "Step policy was escalate_hitl, so the recovery agent was not invoked.",
+                },
+            ),
             "recovered":     False,
         }
 
@@ -567,7 +878,7 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     future   = pool_rec.submit(lambda: sub_agent.invoke(recovery_input))  # type: ignore[arg-type]
     try:
         try:
-            future.result(timeout=timeouts["executor_recovery"])
+            recovery_result = future.result(timeout=timeouts["executor_recovery"])
         except FuturesTimeout:
             pool_rec.shutdown(wait=False)
             logger.error("[executor_v2] Recovery LLM timed out after %ss for %s",
@@ -589,6 +900,20 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
                 "halt_flag":   True,
                 "halt_reason": "TASK_FAILURE",
                 "planned_steps": _planned_steps,
+                "retry_context": _make_retry_context(
+                    task=task,
+                    skill_name=skill_name,
+                    steps=steps,
+                    failed_step=failed_step,  # type: ignore[arg-type]
+                    failure_info={
+                        "error_type": "RECOVERY_TIMEOUT",
+                        "message": f"Recovery agent timed out after {timeouts['executor_recovery']}s.",
+                    },
+                    recovery_conclusion={
+                        "status": "timeout",
+                        "message": "Recovery agent did not finish, so no recovery conclusion was produced.",
+                    },
+                ),
                 "recovered":     False,
             }
     except _EscalateHITLException as e:
@@ -610,6 +935,23 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
             "halt_flag":   True,
             "halt_reason": "TASK_FAILURE",
             "planned_steps": _planned_steps,
+            "retry_context": _make_retry_context(
+                task=task,
+                skill_name=skill_name,
+                steps=steps,
+                failed_step=failed_step,  # type: ignore[arg-type]
+                failure_info={
+                    "error_type": e.error_type,
+                    "message": e.reason or "",
+                    "suggestion": e.suggestion,
+                },
+                recovery_conclusion={
+                    "status": "escalated_to_hitl",
+                    "error_type": e.error_type,
+                    "reason": e.reason or "",
+                    "suggestion": e.suggestion,
+                },
+            ),
             "recovered":     True,
         }
     finally:
@@ -625,6 +967,7 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
             message=f"{skill_name} recovered by LLM after step {failed_step.step_id} failure.",  # type: ignore[union-attr]
         ),
         "current_task": {},
+        "retry_context": None,
         "planned_steps": _planned_steps,
         "recovered":     True,
     }

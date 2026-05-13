@@ -108,5 +108,6 @@ def make_initial_state(prompt: str) -> dict:
         "plan_review_action":  None,
         "intervention_action": None,
         "hitl_command":        None,
+        "retry_context":       None,
         "execution_log":       [],
     }

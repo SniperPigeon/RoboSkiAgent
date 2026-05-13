@@ -16,10 +16,18 @@ from SkiLib.registry import SkillRegistry
 logger = get_logger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_ASSEMBLY_REFERENCE = Path(__file__).resolve().parents[2] / "SkiLib" / "genesis" / "assembly.md"
 
 
 def _load_prompt(name: str) -> str:
     return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
+
+
+def _load_assembly_reference() -> str:
+    try:
+        return _ASSEMBLY_REFERENCE.read_text(encoding="utf-8")
+    except OSError:
+        return "(assembly reference unavailable)"
 
 
 # ---- SupervisorOutput schema ---------------------------------------------------
@@ -92,6 +100,7 @@ def _build_supervisor_prompt() -> str:
     return _load_prompt("supervisor.txt").format(
         skills_text=skills_text,
         scene_snapshot=_build_scene_snapshot(),
+        assembly_reference=_load_assembly_reference(),
     )
 
 

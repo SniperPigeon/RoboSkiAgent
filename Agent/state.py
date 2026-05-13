@@ -32,6 +32,10 @@ class GlobalState(TypedDict):
     # Internal routing field for HITLHandler: "retry" | "next_task" | "replan" | "abort"
     hitl_command: Optional[str]
 
+    # Background for HITL retry. Executor injects this into the planning prompt
+    # so the LLM can decide how to resume without mutating current_task.
+    retry_context: Optional[dict]
+
     # Execution log written by Context Flush; Annotated list enables append-only updates
     execution_log: Annotated[list[str], operator.add]
 

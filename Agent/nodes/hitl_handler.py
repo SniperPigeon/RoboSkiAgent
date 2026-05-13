@@ -40,6 +40,7 @@ def hitl_handler(state: GlobalState) -> dict:
         result["halt_flag"]     = False
         result["halt_reason"]   = None
         result["current_task"]  = {}
+        result["retry_context"] = None
         result["execution_log"] = [f"[hitl_handler] {tid} -> NEXT_TASK (skipped)"]
 
     elif command == "replan":
@@ -47,6 +48,7 @@ def hitl_handler(state: GlobalState) -> dict:
         result["halt_flag"]     = False
         result["halt_reason"]   = None
         result["current_task"]  = {}
+        result["retry_context"] = None
         result["todo_list"]     = []
         result["messages"]      = [HumanMessage(
             content=f"[HITL] Task {tid} failed. Please review the execution history above and produce a revised plan."
@@ -58,6 +60,7 @@ def hitl_handler(state: GlobalState) -> dict:
         result["halt_flag"]     = False
         result["halt_reason"]   = None
         result["current_task"]  = {}
+        result["retry_context"] = None
         result["todo_list"]     = []
         result["execution_log"] = [f"[hitl_handler] {tid} -> ABORT"]
 
