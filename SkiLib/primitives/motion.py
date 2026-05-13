@@ -1,5 +1,7 @@
 from typing import List, Union
 
+import numpy as np
+
 from SkiLib.base import (
     BasePrimitive,
     ERROR_IK_FAILURE,
@@ -20,6 +22,21 @@ from SkiLib.genesis.motion import (
     validate_joint_target,
 )
 from SkiLib.genesis.types import SceneTarget
+
+
+def _target_orientation_data(target: SceneTarget) -> dict:
+    w, x, y, z = (float(v) for v in target.pose.quat)
+    yaw = float((np.degrees(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))) + 180.0) % 360.0 - 180.0)
+    return {
+        "target_quat_wxyz": [w, x, y, z],
+        "target_yaw_deg": round(yaw, 1),
+        "target_tcp_yaw_deg": round(yaw, 1),
+        "target_object_yaw_deg": (
+            round(target.pose.expected_object_yaw_deg, 1)
+            if target.pose.expected_object_yaw_deg is not None
+            else None
+        ),
+    }
 
 
 def _snapshot(runtime) -> RobotState:
@@ -52,7 +69,11 @@ class MoveJ(BasePrimitive):
                 success=True,
                 execution_phase=ExecutionPhase.PLANNING,
                 message=f"MoveJ target '{target.name}' has a valid Genesis IK solution.",
-                data={"target": target.name, "qpos": ik.qpos.tolist() if ik.qpos is not None else None},
+                data={
+                    "target": target.name,
+                    "qpos": ik.qpos.tolist() if ik.qpos is not None else None,
+                    **_target_orientation_data(target),
+                },
             )
         if isinstance(target, list):
             try:
@@ -117,7 +138,11 @@ class MoveJ(BasePrimitive):
                 execution_phase=ExecutionPhase.EXECUTION,
                 robot_state=state,
                 message=f"MoveJ to '{target_name}' executed successfully.",
-                data={"joints": state.joints, "final_joint_error": final_error},
+                data={
+                    "joints": state.joints,
+                    "final_joint_error": final_error,
+                    **(_target_orientation_data(target) if isinstance(target, SceneTarget) else {}),
+                },
             )
         except Exception as e:
             return SkillResult(
@@ -178,7 +203,7 @@ class MoveL(BasePrimitive):
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
             message=f"MoveL target '{target.name}' has valid waypoint IK solutions.",
-            data={"target": target.name, "waypoints": len(qposes)},
+            data={"target": target.name, "waypoints": len(qposes), **_target_orientation_data(target)},
         )
 
     @require_robot_active
@@ -199,8 +224,15 @@ class MoveL(BasePrimitive):
                 return _ik_failure_result(target.name, failed)
 
             max_error = 0.0
-            for qpos in qposes:
-                reached, final_error = control_to_qpos(self.runtime, qpos, max_steps=180, tolerance=0.04)
+            for idx, qpos in enumerate(qposes):
+                is_final_waypoint = idx == len(qposes) - 1
+                reached, final_error = control_to_qpos(
+                    self.runtime,
+                    qpos,
+                    max_steps=260 if is_final_waypoint else 180,
+                    tolerance=0.012 if is_final_waypoint else 0.03,
+                    settle_tolerance=0.04 if is_final_waypoint else 0.08,
+                )
                 max_error = max(max_error, final_error)
                 if not reached:
                     return SkillResult(
@@ -219,7 +251,12 @@ class MoveL(BasePrimitive):
                 execution_phase=ExecutionPhase.EXECUTION,
                 robot_state=state,
                 message=f"MoveL to '{target.name}' executed successfully.",
-                data={"joints": state.joints, "max_joint_error": max_error, "waypoints": len(qposes)},
+                data={
+                    "joints": state.joints,
+                    "max_joint_error": max_error,
+                    "waypoints": len(qposes),
+                    **_target_orientation_data(target),
+                },
             )
         except Exception as e:
             return SkillResult(
