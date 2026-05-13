@@ -10,6 +10,11 @@ from SkiLib.base import (
     require_robot_active,
 )
 from SkiLib.genesis.motion import get_tcp_pos
+from SkiLib.genesis.scene import (
+    FMB_PART_HEIGHT,
+    FMB_PART_REF_Z_FROM_BOTTOM,
+    TCP_OFFSET_Z,
+)
 from SkiLib.genesis.types import SceneObject
 
 ERROR_ITEM_NOT_FOUND = "ITEM_NOT_FOUND"
@@ -44,14 +49,21 @@ class Grasp(BasePrimitive):
         try:
             tcp_pos = get_tcp_pos(self.runtime)
             obj_pos = np.array(expected_item.entity.get_pos().tolist(), dtype=float)
-            dist = float(np.linalg.norm(tcp_pos - obj_pos))
+            part_height = FMB_PART_HEIGHT.get(expected_item.name)
+            ref_z_from_bottom = FMB_PART_REF_Z_FROM_BOTTOM.get(expected_item.name)
+            if part_height is not None and ref_z_from_bottom is not None:
+                expected_tcp_pos = obj_pos.copy()
+                expected_tcp_pos[2] += part_height / 2 - ref_z_from_bottom + TCP_OFFSET_Z
+            else:
+                expected_tcp_pos = obj_pos
+            dist = float(np.linalg.norm(tcp_pos - expected_tcp_pos))
             if dist > GRASP_PROXIMITY_THRESHOLD:
                 return SkillResult(
                     success=False,
                     execution_phase=ExecutionPhase.PLANNING,
                     error_type=ERROR_GRIPPER_FAILURE,
                     message=(
-                        f"TCP is {dist:.3f} m from '{expected_item.name}' "
+                        f"TCP is {dist:.3f} m from '{expected_item.name}' grasp point "
                         f"(threshold {GRASP_PROXIMITY_THRESHOLD} m). Move closer before grasping."
                     ),
                     suggestion="Execute a MoveL to the pick target before calling Grasp.",
@@ -67,7 +79,7 @@ class Grasp(BasePrimitive):
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
-            message=f"Grasp pre-check passed. TCP is {dist:.3f} m from '{expected_item.name}'.",
+            message=f"Grasp pre-check passed. TCP is {dist:.3f} m from '{expected_item.name}' grasp point.",
             data={"tcp_to_object_dist": dist},
         )
 
@@ -93,12 +105,14 @@ class Grasp(BasePrimitive):
                 suggestion="Call Release before attempting a new Grasp.",
             )
         try:
+            self.runtime.unmark_assembled_object(expected_item.name)
             tcp_link = self.runtime.robot.get_link(self.runtime.bundle.tcp_link_name)
             obj_link = expected_item.entity.base_link
             self.runtime.rigid_solver.add_weld_constraint(obj_link.idx, tcp_link.idx)
             self.runtime.held_item_name = expected_item.name
             self.runtime._weld_pair = (obj_link.idx, tcp_link.idx)
             self.runtime.scene.step()
+            self.runtime.stabilize_assembled_objects()
         except Exception as e:
             return SkillResult(
                 success=False,
@@ -180,7 +194,9 @@ class Release(BasePrimitive):
             self.runtime.rigid_solver.delete_weld_constraint(obj_idx, tcp_idx)
             self.runtime.held_item_name = None
             self.runtime._weld_pair = None
+            snap_info = self.runtime.snap_object_to_place_target(expected_item.name)
             self.runtime.scene.step()
+            self.runtime.stabilize_assembled_objects()
         except Exception as e:
             return SkillResult(
                 success=False,
@@ -194,7 +210,7 @@ class Release(BasePrimitive):
             execution_phase=ExecutionPhase.EXECUTION,
             robot_state=self.runtime.get_current_state(),
             message=f"Released '{expected_item.name}', weld constraint removed.",
-            data={"released_item": expected_item.name},
+            data={"released_item": expected_item.name, "placement_snap": snap_info},
         )
 
     def try_execute(self, expected_item: SceneObject, tool: Optional[object] = None) -> SkillResult:

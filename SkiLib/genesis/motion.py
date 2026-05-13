@@ -88,11 +88,18 @@ def control_to_qpos(
     settle_tolerance: float = 0.08,
 ) -> tuple[bool, float]:
     arm_dofs = runtime.bundle.arm_dofs
+    gripper_dofs = runtime.bundle.gripper_dofs
     target_arm = np.asarray(qpos, dtype=float)[arm_dofs]
+    current_full = current_qpos(runtime)
+    hold_gripper = current_full[gripper_dofs].copy() if len(gripper_dofs) > 0 else None
 
     for _ in range(max_steps):
         runtime.robot.control_dofs_position(target_arm, dofs_idx_local=arm_dofs)
+        if hold_gripper is not None:
+            runtime.robot.control_dofs_position(hold_gripper, dofs_idx_local=gripper_dofs)
+        runtime.stabilize_assembled_objects()
         runtime.scene.step()
+        runtime.stabilize_assembled_objects()
         current = current_arm_qpos(runtime)
         err = float(np.linalg.norm(current - target_arm))
         if err <= tolerance:
@@ -102,7 +109,11 @@ def control_to_qpos(
     err = float(np.linalg.norm(current - target_arm))
     if err <= settle_tolerance:
         runtime.robot.set_dofs_position(target_arm, dofs_idx_local=arm_dofs)
+        if hold_gripper is not None:
+            runtime.robot.set_dofs_position(hold_gripper, dofs_idx_local=gripper_dofs)
+        runtime.stabilize_assembled_objects()
         runtime.scene.step()
+        runtime.stabilize_assembled_objects()
         current = current_arm_qpos(runtime)
         return True, float(np.linalg.norm(current - target_arm))
     return False, err

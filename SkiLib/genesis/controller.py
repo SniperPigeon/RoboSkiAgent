@@ -89,7 +89,7 @@ class GenesisController:
         # controller a real restoring force against gravity; tracking current qpos
         # zeroes the position error every step and causes the arm to slowly droop.
         hold_qpos = self.runtime.bundle.home_qpos[arm_dofs].copy()
-        # Gripper starts and stays open (all-zero = open for Robotiq 2F-85).
+        # Gripper starts and stays open (all-zero = open for Robotiq 2F-140).
         # Without active control the gripper closes under gravity/spring forces.
         hold_gripper_qpos = self.runtime.bundle.home_qpos[gripper_dofs].copy()
 
@@ -98,6 +98,7 @@ class GenesisController:
                 fn, args, kwargs, fut = self._queue.get(timeout=self._IDLE_POLL_S)
                 try:
                     result = fn(*args, **kwargs)
+                    self.runtime.stabilize_assembled_objects()
                     fut.set_result(result)
                 except Exception as exc:
                     fut.set_exception(exc)
@@ -121,7 +122,9 @@ class GenesisController:
                         self.runtime.robot.control_dofs_position(
                             hold_gripper_qpos, dofs_idx_local=gripper_dofs
                         )
+                    self.runtime.stabilize_assembled_objects()
                     self.runtime.scene.step()
+                    self.runtime.stabilize_assembled_objects()
                 except Exception:
                     pass
 

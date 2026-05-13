@@ -15,7 +15,7 @@ TABLE_H   = 0.72
 TABLE_CX  = 0.7
 ROBOT_X   = 0.35
 TCP_LINK_NAME = "wrist_3_link"
-# Vertical distance from wrist_3_link (TCP) to Robotiq 2F-85 finger contact surface.
+# Vertical distance from wrist_3_link (TCP) to Robotiq 2F-140 finger contact surface.
 # Tune this value if the gripper visually over- or under-shoots the part during pick.
 TCP_OFFSET_Z = 0.172
 
@@ -37,6 +37,13 @@ FMB_PART_HEIGHT = {
     "Part_B": 0.037,
     "Part_C": 0.100,
 }
+FMB_PART_REF_Z_FROM_BOTTOM = {
+    "Part_A_1": 0.044138,
+    "Part_A_2": 0.044138,
+    "Part_B": 0.018500,
+    "Part_C": 0.039964,
+}
+FMB_PARTS = ("Part_A_1", "Part_A_2", "Part_B", "Part_C")
 
 # Approximate assembly locations from the original Board 1 STEP body positions,
 # expressed relative to teasor_board's centre.  teasor_board is the central tray; the
@@ -52,6 +59,18 @@ FMB_PLACE_BOTTOM_Z = {
     "Part_A_2": TABLE_H + 0.005,
     "Part_B": TABLE_H + 0.040,
     "Part_C": TABLE_H + 0.005,
+}
+FMB_PLACE_YAW_DEG = {
+    "Part_A_1": 0.0,
+    "Part_A_2": 0.0,
+    "Part_B": 0.0,
+    "Part_C": 0.0,
+}
+FMB_PICK_YAW_DEG = {
+    "Part_A_1": 0.0,
+    "Part_A_2": 0.0,
+    "Part_B": 90.0,
+    "Part_C": 0.0,
 }
 
 # Backward-compatible name used by runtime.compute_pick_pose().
@@ -93,13 +112,30 @@ def _patch_empty_cpu_name() -> None:
     genesis_misc.cpuinfo.get_cpu_info = _patched_get_cpu_info
 
 
-def make_target(name: str, pos: tuple[float, float, float], kind: str) -> SceneTarget:
-    """Create a SceneTarget with fixed top-down TCP orientation."""
+def top_down_quat(yaw_deg: float = 0.0) -> tuple[float, float, float, float]:
+    """Create a top-down TCP quaternion with an additional world-Z yaw."""
+    half = np.radians(yaw_deg) / 2.0
+    # world yaw qz=(cos,0,0,sin) composed with top-down q=(0,1,0,0)
+    return (0.0, float(np.cos(half)), float(np.sin(half)), 0.0)
+
+
+def make_target(
+    name: str,
+    pos: tuple[float, float, float],
+    kind: str,
+    *,
+    yaw_deg: float = 0.0,
+    expected_object_yaw_deg: float | None = None,
+    quat: tuple[float, float, float, float] | None = None,
+) -> SceneTarget:
+    """Create a SceneTarget with an explicit TCP orientation."""
     pose = TargetPose(
         name=name,
         pos=pos,
-        quat=(0.0, 1.0, 0.0, 0.0),
+        quat=quat if quat is not None else top_down_quat(yaw_deg),
         kind=kind,  # type: ignore[arg-type]
+        yaw_deg=float(yaw_deg),
+        expected_object_yaw_deg=expected_object_yaw_deg,
     )
     return SceneTarget(name=name, pose=pose)
 
@@ -116,24 +152,39 @@ def _build_fmb_targets() -> dict[str, SceneTarget]:
         ),
     }
 
-    for name in ("Part_A_1", "Part_A_2", "Part_B", "Part_C"):
+    for name in FMB_PARTS:
         height = FMB_PART_HEIGHT[name]
         sx, sy = FMB_PART_STAGE_X[name], FMB_STAGE_Y
         pick_tcp_z = TABLE_H + height / 2 + TCP_OFFSET_Z
         pick_pos = (sx, sy, pick_tcp_z)
         pick_appr = (sx, sy, pick_tcp_z + APPROACH_CLEARANCE)
+        pick_yaw = FMB_PICK_YAW_DEG[name]
 
         px, py = FMB_PLACE_XY[name]
         place_tcp_z = FMB_PLACE_BOTTOM_Z[name] + height / 2 + TCP_OFFSET_Z
         place_pos = (px, py, place_tcp_z)
         place_appr = (px, py, place_tcp_z + APPROACH_CLEARANCE)
+        expected_object_yaw = FMB_PLACE_YAW_DEG[name]
+        # A welded grasp preserves object-to-TCP yaw. To land the object at the
+        # desired yaw, the TCP place yaw must include the pick yaw offset.
+        place_yaw = pick_yaw + expected_object_yaw
 
-        targets[f"{name}_Approach"] = make_target(f"{name}_Approach", pick_appr, "approach")
-        targets[f"{name}_Pick"] = make_target(f"{name}_Pick", pick_pos, "pick")
-        targets[f"{name}_Place_Approach"] = make_target(
-            f"{name}_Place_Approach", place_appr, "approach"
+        targets[f"{name}_Approach"] = make_target(
+            f"{name}_Approach", pick_appr, "approach", yaw_deg=pick_yaw
         )
-        targets[f"{name}_Place"] = make_target(f"{name}_Place", place_pos, "place")
+        targets[f"{name}_Pick"] = make_target(
+            f"{name}_Pick", pick_pos, "pick", yaw_deg=pick_yaw
+        )
+        targets[f"{name}_Place_Approach"] = make_target(
+            f"{name}_Place_Approach", place_appr, "approach", yaw_deg=place_yaw
+        )
+        targets[f"{name}_Place"] = make_target(
+            f"{name}_Place",
+            place_pos,
+            "place",
+            yaw_deg=place_yaw,
+            expected_object_yaw_deg=expected_object_yaw,
+        )
 
     return targets
 
@@ -183,6 +234,8 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
             file=str(FMB_DIR / "teasor_board.stl"),
             fixed=True,
             pos=(FMB_BOARD_X, FMB_BOARD_Y, TABLE_H),
+            decimate=False,
+            convexify=False,
         ),
         surface=gs.surfaces.Default(color=(0.30, 0.40, 0.60, 1.0)),
     )
@@ -193,6 +246,8 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
             gs.morphs.Mesh(
                 file=str(FMB_DIR / filename),
                 pos=(FMB_PART_STAGE_X[name], FMB_STAGE_Y, TABLE_H),
+                decimate=False,
+                convexify=True,
             ),
             surface=gs.surfaces.Default(color=color),
         )
@@ -230,7 +285,7 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
             "Part_C": SceneObject("Part_C", part_c),
         },
         targets=_build_fmb_targets(),
-        tools={"Robotiq_2F_85": robot},
+        tools={"Robotiq_2F_140": robot},
         arm_dofs=arm_dofs,
         gripper_dofs=gripper_dofs,
         home_qpos=home_qpos[: int(robot.n_dofs)],

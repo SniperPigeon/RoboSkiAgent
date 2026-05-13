@@ -19,3 +19,6 @@ PLACEMENT_Z_TOL_M: float = 0.005    # ±5 mm
 # rotates it to world +Z.  A gear tilted > 8° is not seated and cannot engage
 # the shaft slot reliably.
 PLACEMENT_TILT_TOL_DEG: float = 8.0
+
+# Yaw tolerance around world Z for orientation-sensitive assembly parts.
+PLACEMENT_YAW_TOL_DEG: float = 10.0

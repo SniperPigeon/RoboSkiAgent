@@ -1,10 +1,10 @@
 """
-Build combined UR16e + Robotiq 2F-85 URDF without ROS.
+Build combined UR16e + Robotiq 2F-140 URDF without ROS.
 
 Steps:
 1. Mock ament_index_python so xacro $(find pkg) resolves to local paths
 2. Compile UR16e xacro -> URDF XML
-3. Compile Robotiq 2F-85 xacro -> URDF XML
+3. Compile Robotiq 2F-140 xacro -> URDF XML
 4. Merge: append all Robotiq links/joints into UR16e robot element
 5. Add fixed joint: tool0 -> robotiq_arg2f_base_link
 6. Replace package:// paths with absolute file paths
@@ -18,13 +18,13 @@ import xml.etree.ElementTree as ET
 
 _REPO    = Path(__file__).resolve().parents[1]
 UR_DESC  = _REPO / "temp/Universal_Robots_ROS2_Description"
-ROBOTIQ  = _REPO / "temp/Robotiq-2f-85/robotiq_2f_85_gripper_visualization"
+ROBOTIQ  = _REPO / "temp/robotiq_2f_140_source/robotiq_2f_140_gripper_visualization"
 OUT      = _REPO / "res/ur16e_robotiq.urdf"
 
 # ── Mock ament_index_python ──────────────────────────────────────────────────
 PKG_MAP = {
     "ur_description": str(UR_DESC),
-    "robotiq_2f_85_gripper_visualization": str(ROBOTIQ),
+    "robotiq_2f_140_gripper_visualization": str(ROBOTIQ),
 }
 
 def _get_pkg(pkg: str) -> str:
@@ -55,9 +55,9 @@ ur_doc = xacro.process_file(str(UR_DESC / "urdf/ur.urdf.xacro"), mappings={
 })
 ur_xml = ur_doc.toxml()
 
-# ── Compile Robotiq 2F-85 ────────────────────────────────────────────────────
-print("Compiling Robotiq 2F-85 ...")
-rq_doc = xacro.process_file(str(ROBOTIQ / "urdf/robotiq_arg2f_85_model.xacro"), mappings={})
+# ── Compile Robotiq 2F-140 ───────────────────────────────────────────────────
+print("Compiling Robotiq 2F-140 ...")
+rq_doc = xacro.process_file(str(ROBOTIQ / "urdf/robotiq_arg2f_140_model.xacro"), mappings={})
 rq_xml = rq_doc.toxml()
 
 # ── Merge ────────────────────────────────────────────────────────────────────
