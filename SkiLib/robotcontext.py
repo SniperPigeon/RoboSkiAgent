@@ -172,112 +172,44 @@ class PrimitiveRegistry:
 
     def as_tools(self) -> list:
         from langchain_core.tools import StructuredTool
-        from pydantic import BaseModel, Field as PField
-
-        from SkiLib.base import SkillResult, ExecutionPhase, ERROR_INVALID_PARAM
+        from SkiLib.base import SkillResult
+        from SkiLib.tool_schema import build_pydantic_schema, resolve_tool_kwargs
 
         tools: list[StructuredTool] = []
 
-        def _resolve_target(name: str):
-            try:
-                return self.runtime.resolve_target(name), None
-            except KeyError:
-                err = SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.VALIDATION,
-                    error_type=ERROR_INVALID_PARAM,
-                    message=f"Target '{name}' not found in the Genesis scene.",
-                    suggestion="Use list_targets() to see valid target names.",
+        def _make_tool(primitive, parameters: dict):
+            def _invoke(**kwargs) -> dict:
+                resolved_kwargs, err = resolve_tool_kwargs(self.runtime, parameters, kwargs)
+                if err is not None:
+                    return err.to_llm_message()
+
+                result = primitive.try_execute(**resolved_kwargs)
+                return result.to_llm_message() if isinstance(result, SkillResult) else result
+
+            return _invoke
+
+        for class_name, primitive in self._primitives.items():
+            parameters = getattr(primitive, "TOOL_PARAMETERS", None)
+            if not parameters:
+                logger.debug(
+                    "PrimitiveRegistry: '%s' has no TOOL_PARAMETERS, skipping tool exposure.",
+                    class_name,
                 )
-                return None, err
+                continue
 
-        def _resolve_object(name: str):
-            try:
-                return self.runtime.resolve_object(name), None
-            except KeyError:
-                err = SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.VALIDATION,
-                    error_type=ERROR_INVALID_PARAM,
-                    message=f"Object '{name}' not found in the Genesis scene.",
-                    suggestion="Use list_objects() to see valid object names.",
-                )
-                return None, err
-
-        if "MoveJ" in self._primitives:
-            prim_movej = self._primitives["MoveJ"]
-
-            class MoveJSchema(BaseModel):
-                target: str = PField(description="Genesis target name to move to with joint motion.")
-
-            def _movej(target: str) -> dict:
-                item, err = _resolve_target(target)
-                if err:
-                    return err.to_llm_message()
-                return prim_movej.try_execute(target=item).to_llm_message()
+            tool_name = getattr(primitive, "TOOL_NAME", None) or class_name
+            description = (
+                getattr(primitive, "TOOL_DESCRIPTION", "")
+                or primitive.__doc__
+                or f"{tool_name} primitive"
+            )
+            args_schema = build_pydantic_schema(tool_name, parameters)
 
             tools.append(StructuredTool(
-                name="MoveJ",
-                description="Move the robot to a named Genesis target using joint motion.",
-                func=_movej,
-                args_schema=MoveJSchema,
-            ))
-
-        if "MoveL" in self._primitives:
-            prim_movel = self._primitives["MoveL"]
-
-            class MoveLSchema(BaseModel):
-                target: str = PField(description="Genesis target name to move to with Cartesian linear motion.")
-
-            def _movel(target: str) -> dict:
-                item, err = _resolve_target(target)
-                if err:
-                    return err.to_llm_message()
-                return prim_movel.try_execute(target=item).to_llm_message()
-
-            tools.append(StructuredTool(
-                name="MoveL",
-                description="Move the TCP to a named Genesis target using linear Cartesian motion.",
-                func=_movel,
-                args_schema=MoveLSchema,
-            ))
-
-        if "Grasp" in self._primitives:
-            prim_grasp = self._primitives["Grasp"]
-
-            class GraspSchema(BaseModel):
-                expected_item: str = PField(description="Genesis object name of the workpiece to grasp.")
-
-            def _grasp(expected_item: str) -> dict:
-                item, err = _resolve_object(expected_item)
-                if err:
-                    return err.to_llm_message()
-                return prim_grasp.try_execute(expected_item=item).to_llm_message()
-
-            tools.append(StructuredTool(
-                name="Grasp",
-                description="Close the gripper around a named Genesis workpiece.",
-                func=_grasp,
-                args_schema=GraspSchema,
-            ))
-
-        if "Release" in self._primitives:
-            prim_release = self._primitives["Release"]
-
-            class ReleaseSchema(BaseModel):
-                expected_item: str = PField(description="Genesis object name of the workpiece to release.")
-
-            def _release(expected_item: str) -> dict:
-                item, err = _resolve_object(expected_item)
-                if err:
-                    return err.to_llm_message()
-                return prim_release.try_execute(expected_item=item).to_llm_message()
-
-            tools.append(StructuredTool(
-                name="Release",
-                description="Open the gripper and release the currently held Genesis workpiece.",
-                func=_release,
-                args_schema=ReleaseSchema,
+                name=tool_name,
+                description=description.strip(),
+                func=_make_tool(primitive, parameters),
+                args_schema=args_schema,
             ))
 
         return tools

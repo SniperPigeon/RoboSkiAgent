@@ -252,6 +252,10 @@ class BasePrimitive(ABC):
         4. Place the module inside the primitives/ directory for auto-discovery.
     """
 
+    TOOL_NAME: Optional[str] = None
+    TOOL_DESCRIPTION: str = ""
+    TOOL_PARAMETERS: Dict[str, Dict[str, Any]] = {}
+
     def __init__(self, runtime):
         self.runtime = runtime
 

@@ -28,6 +28,17 @@ GRASP_PROXIMITY_THRESHOLD = 0.18  # metres
 class Grasp(BasePrimitive):
     """Genesis gripper close + weld-constraint attachment primitive."""
 
+    TOOL_NAME = "Grasp"
+    TOOL_DESCRIPTION = "Close the gripper around a named Genesis workpiece."
+    TOOL_PARAMETERS = {
+        "expected_item": {
+            "type": "str",
+            "required": True,
+            "description": "Genesis object name of the workpiece to grasp.",
+            "resolver": "object",
+        },
+    }
+
     def __init__(self, runtime):
         super().__init__(runtime)
 
@@ -145,6 +156,17 @@ class Grasp(BasePrimitive):
 
 class Release(BasePrimitive):
     """Genesis gripper open + weld-constraint release primitive."""
+
+    TOOL_NAME = "Release"
+    TOOL_DESCRIPTION = "Open the gripper and release the currently held Genesis workpiece."
+    TOOL_PARAMETERS = {
+        "expected_item": {
+            "type": "str",
+            "required": True,
+            "description": "Genesis object name of the workpiece to release.",
+            "resolver": "object",
+        },
+    }
 
     def __init__(self, runtime):
         super().__init__(runtime)

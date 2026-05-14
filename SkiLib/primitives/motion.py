@@ -57,6 +57,17 @@ def _ik_failure_result(target_name: str, ik: IKResult) -> SkillResult:
 class MoveJ(BasePrimitive):
     """Genesis joint-space point-to-point motion primitive."""
 
+    TOOL_NAME = "MoveJ"
+    TOOL_DESCRIPTION = "Move the robot to a named Genesis target using joint motion."
+    TOOL_PARAMETERS = {
+        "target": {
+            "type": "str",
+            "required": True,
+            "description": "Genesis target name to move to with joint motion.",
+            "resolver": "target",
+        },
+    }
+
     def __init__(self, runtime):
         super().__init__(runtime)
 
@@ -164,6 +175,17 @@ class MoveJ(BasePrimitive):
 
 class MoveL(BasePrimitive):
     """Genesis Cartesian linear motion primitive."""
+
+    TOOL_NAME = "MoveL"
+    TOOL_DESCRIPTION = "Move the TCP to a named Genesis target using linear Cartesian motion."
+    TOOL_PARAMETERS = {
+        "target": {
+            "type": "str",
+            "required": True,
+            "description": "Genesis target name to move to with Cartesian linear motion.",
+            "resolver": "target",
+        },
+    }
 
     def __init__(self, runtime):
         super().__init__(runtime)

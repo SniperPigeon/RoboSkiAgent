@@ -19,53 +19,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, get_args
+from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel
 
 from SkiLib.log import get_logger
+from SkiLib.tool_schema import build_pydantic_schema
 
 logger = get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# Type helpers
-# ---------------------------------------------------------------------------
-
-_PRIMITIVE_TYPES: dict[str, type] = {
-    "str":   str,
-    "int":   int,
-    "float": float,
-    "bool":  bool,
-}
-
-
-def _build_annotation(param_def: dict[str, Any]) -> Any:
-    """
-    Convert a single parameter definition dict to a Python type annotation.
-
-    Supports:
-    - Plain types:  type: str | int | float | bool
-    - Enum:         type: str + enum: ["A", "B"]  →  Literal["A", "B"]
-    - Optional:     required: false  →  Optional[T]
-    """
-    raw_type = param_def.get("type", "str")
-    base_type = _PRIMITIVE_TYPES.get(raw_type, str)
-
-    enum_values = param_def.get("enum")
-    if enum_values:
-        from typing import Literal
-        # Build Literal[...] from enum list; values must match base_type
-        annotation = Literal[tuple(enum_values)]  # type: ignore[valid-type]
-    else:
-        annotation = base_type
-
-    required = param_def.get("required", True)
-    if not required:
-        annotation = Optional[annotation]  # type: ignore[assignment]
-
-    return annotation
-
 
 # ---------------------------------------------------------------------------
 # SkillSpec
@@ -202,7 +164,7 @@ class SkillMdLoader:
         req_prims   = meta.get("required_primitives") or []
         parameters  = meta.get("parameters") or {}
 
-        args_schema = self._build_pydantic_schema(name, parameters)
+        args_schema = build_pydantic_schema(name, parameters)
 
         return SkillSpec(
             name=name,
@@ -220,36 +182,5 @@ class SkillMdLoader:
         skill_name: str,
         parameters: dict[str, Any],
     ) -> type[BaseModel]:
-        """
-        Dynamically build a Pydantic BaseModel from a parameters dict.
-
-        Each entry in *parameters* has the shape:
-            field_name:
-                type: str | int | float | bool
-                required: true | false   (default: true)
-                default: <value>         (only used when required: false)
-                description: "..."
-                enum: [...]              (optional; produces Literal type)
-
-        Returns a new BaseModel subclass named "<SkillName>Params".
-        """
-        if not parameters:
-            # No parameters: return an empty model
-            return create_model(f"{skill_name}Params")  # type: ignore[return-value]
-
-        field_definitions: dict[str, Any] = {}
-
-        for field_name, param_def in parameters.items():
-            annotation  = _build_annotation(param_def)
-            description = param_def.get("description", "")
-            required    = param_def.get("required", True)
-            default_val = param_def.get("default", ...)  # Pydantic uses ... for required
-
-            if not required and default_val is ...:
-                default_val = None  # Optional fields default to None if no default given
-
-            field_info = Field(default=default_val, description=description)
-            field_definitions[field_name] = (annotation, field_info)
-
-        model = create_model(f"{skill_name}Params", **field_definitions)  # type: ignore[call-overload]
-        return model  # type: ignore[return-value]
+        """Backward-compatible wrapper for tests and older call sites."""
+        return build_pydantic_schema(skill_name, parameters)
