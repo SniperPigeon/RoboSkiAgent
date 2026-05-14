@@ -1,9 +1,10 @@
 # FMB Assembly Reference
 
 This file is the human-readable assembly reference for the Genesis FMB scene.
-The executable source of truth is `SkiLib/genesis/assembly_specs.py`; this
-document mirrors those symbols so an LLM/operator can plan without inventing
-angles or target names.
+The editable source of truth is `SkiLib/scenes/fmb/assembly.yaml`;
+`SkiLib/genesis/assembly_specs.py` loads and validates that file. This document
+mirrors those symbols so an LLM/operator can plan without inventing angles or
+target names.
 
 ## Default Assembly Order
 

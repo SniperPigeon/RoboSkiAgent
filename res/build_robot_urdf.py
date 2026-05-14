@@ -7,7 +7,7 @@ Steps:
 3. Compile Robotiq 2F-140 xacro -> URDF XML
 4. Merge: append all Robotiq links/joints into UR16e robot element
 5. Add fixed joint: tool0 -> robotiq_arg2f_base_link
-6. Replace package:// paths with absolute file paths
+6. Replace package:// paths with repo-relative res/robot_models paths
 7. Write combined URDF
 """
 import sys
@@ -17,9 +17,11 @@ from xml.dom import minidom
 import xml.etree.ElementTree as ET
 
 _REPO    = Path(__file__).resolve().parents[1]
-UR_DESC  = _REPO / "temp/Universal_Robots_ROS2_Description"
-ROBOTIQ  = _REPO / "temp/robotiq_2f_140_source/robotiq_2f_140_gripper_visualization"
+UR_DESC  = _REPO / "res/robot_models/Universal_Robots_ROS2_Description"
+ROBOTIQ  = _REPO / "res/robot_models/robotiq_2f_140_gripper_visualization"
 OUT      = _REPO / "res/ur16e_robotiq.urdf"
+UR_MESHES_OUT = "robot_models/Universal_Robots_ROS2_Description"
+ROBOTIQ_MESHES_OUT = "robot_models/robotiq_2f_140_gripper_visualization"
 
 # ── Mock ament_index_python ──────────────────────────────────────────────────
 PKG_MAP = {
@@ -78,8 +80,13 @@ ET.SubElement(attach, "origin", xyz="0 0 0", rpy="0 0 0")
 
 # ── Fix package:// and file:/// paths ────────────────────────────────────────
 combined_xml = ET.tostring(ur_root, encoding="unicode")
-for pkg, path in PKG_MAP.items():
-    combined_xml = combined_xml.replace(f"package://{pkg}", path)
+combined_xml = combined_xml.replace(f"package://ur_description", UR_MESHES_OUT)
+combined_xml = combined_xml.replace(
+    f"package://robotiq_2f_140_gripper_visualization",
+    ROBOTIQ_MESHES_OUT,
+)
+combined_xml = combined_xml.replace(str(UR_DESC), UR_MESHES_OUT)
+combined_xml = combined_xml.replace(str(ROBOTIQ), ROBOTIQ_MESHES_OUT)
 # urdfpy resolves filenames relative to the URDF location, so file:/// must be stripped
 combined_xml = combined_xml.replace("file:///", "/")
 

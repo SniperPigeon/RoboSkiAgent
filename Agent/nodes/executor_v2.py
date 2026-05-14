@@ -40,12 +40,13 @@ from Agent.state import GlobalState
 from SkiLib.base import ERROR_ROBOT_INACTIVE, ExecutionPhase, SkillResult
 from SkiLib.log import get_logger
 from SkiLib.robotcontext import RobotContext
+from SkiLib.scenes.fmb import ASSEMBLY_REFERENCE_PATH
 from SkiLib.skill_loader import SkillMdLoader
 
 logger = get_logger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-_ASSEMBLY_REFERENCE = Path(__file__).resolve().parents[2] / "SkiLib" / "genesis" / "assembly.md"
+_ASSEMBLY_REFERENCE = ASSEMBLY_REFERENCE_PATH
 
 
 def _load_prompt(name: str) -> str:

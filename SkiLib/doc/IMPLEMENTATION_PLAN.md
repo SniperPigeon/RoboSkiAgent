@@ -231,7 +231,7 @@ def main():
 - 均包装为 LangChain `@tool`
 
 #### 3.2 YAML 工艺规范示例
-- **新建**：`SkiLib/specs/assembly_spec.yaml`
+- **新建**：`SkiLib/scenes/fmb/assembly.yaml`
 - 定义目标名称映射、工具 ID、工艺步骤约束、安全边界
 
 #### 3.3 Supervisor 节点
@@ -283,7 +283,7 @@ def main():
 | `SkiLib/primitives/gripper.py` | **新建** | Grasp / Release |
 | `SkiLib/skills/pick_and_place.py` | 修改 | 补全 execute() |
 | `SkiLib/skills/task_skills.py` | **新建** | Task-skills + request_human_intervention |
-| `SkiLib/specs/assembly_spec.yaml` | **新建** | 示例工艺规范 |
+| `SkiLib/scenes/fmb/assembly.yaml` | **新建** | 示例工艺规范 |
 
 ## 可复用的现有实现
 

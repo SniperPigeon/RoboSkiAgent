@@ -90,12 +90,12 @@
   - `list_available_targets() -> SkillResult`：封装 `ListItems(ITEM_TYPE_TARGET)`
   - `list_available_tools() -> SkillResult`：封装 `ListItems(ITEM_TYPE_TOOL)`
   - `get_target_info(target_name) -> SkillResult`：验证目标存在、有无接近点、是否可达，返回完整信息
-  - `query_assembly_spec(part_id) -> SkillResult`：从 `specs/` 目录读取 YAML，返回工艺约束
+  - `query_assembly_spec(part_id) -> SkillResult`：从 `scenes/<scene_name>/` 目录读取 YAML，返回工艺约束
   - `request_human_intervention(reason) -> SkillResult`：
     - 设 `RobotContext.instance().halt_flag = True`
     - **需在 Supervisor 节点内通过 LangGraph `interrupt()` 真正暂停图执行**（见 Phase 3.4）
 
-- [ ] **1.3** 新建 `SkiLib/specs/example_assembly.yaml`：示例工艺规范
+- [ ] **1.3** 新建 `SkiLib/scenes/fmb/assembly.yaml`：示例工艺规范
   - 包含至少 2 个零件 ID（`Part_A`, `Part_B`）、目标位置 ID、工序约束、夹爪类型
   - 命名约定说明：接近点命名规则 `"Approach_<TargetName>"`
 
@@ -349,7 +349,7 @@
 | `SkiLib/utils.py` | ⚠️ 有 print()，待迁移 | 5.5.1 |
 | `SkiLib/primitives/scene_query.py` | 历史 RoboDK 计划；当前不建 | 1.1 |
 | `SkiLib/skills/task_skills.py` | 历史 RoboDK 计划；Genesis metatools 已覆盖基础查询 | 1.2 / G3 |
-| `SkiLib/specs/example_assembly.yaml` | 后续工艺知识扩展项 | 1.3 |
+| `SkiLib/scenes/fmb/assembly.yaml` | 后续工艺知识扩展项 | 1.3 |
 | `SkiLib/schemas.py` | ❌ 待建 | 3.1 |
 | `SkiLib/metatools/informative.py` | ✅ 完成（T-skills: list_targets/objects/tools, check_item_exists, get_gripper_state） | 新增 |
 | `Agent/state.py` | ✅ 完成（GlobalState TypedDict） | 6.2 |

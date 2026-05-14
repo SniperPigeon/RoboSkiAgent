@@ -3,8 +3,9 @@ import sys
 import types
 from pathlib import Path
 
-UR_DESC = Path("/Users/yukun/projects/RoboSkiAgent/temp/Universal_Robots_ROS2_Description")
-OUT = Path("/Users/yukun/projects/RoboSkiAgent/res/ur16e_raw.urdf")
+_REPO = Path(__file__).resolve().parents[1]
+UR_DESC = _REPO / "res/robot_models/Universal_Robots_ROS2_Description"
+OUT = _REPO / "res/ur16e_raw.urdf"
 
 # Mock ament_index_python so $(find ur_description) resolves to our local path
 def _get_package_share_directory(pkg: str) -> str:

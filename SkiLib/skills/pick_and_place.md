@@ -28,7 +28,7 @@ parameters:
   place_target:
     type: str
     required: true
-    description: "Target name for the precise placement point (TCP descends here via MoveL)."
+    desription: "Target name for the precise placement point (TCP descends here via MoveL)."
   transit_motion:
     type: str
     required: false
@@ -46,7 +46,7 @@ parameters:
     required: false
     default: "default"
     enum: ["default", "short_edge", "long_edge"]
-    description: "Symbolic grasp profile from assembly.md. Default uses the per-part code-defined profile; never pass numeric yaw."
+    description: "Symbolic grasp profile from scenes. Default uses the per-part configured profile; never pass numeric yaw."
 
 required_primitives: [MoveJ, MoveL, Grasp, Release]
 ---
@@ -63,7 +63,7 @@ approach → grasp → transit → place → retract sequence.
 > as target names.**  Use `list_targets()` to verify available names if needed.
 
 The optional `grasp_profile` is a symbolic clamp mode from
-`SkiLib/genesis/assembly.md`. It is informational on the nominal path because
+`SkiLib/scenes/fmb/assembly.md`. It is informational on the nominal path because
 the static target names already encode the default TCP yaw. During dynamic
 re-pick recovery, pass it to `compute_pick_pose()` so the fresh targets use the
 same clamp convention.

@@ -12,11 +12,12 @@ from Agent.state import GlobalState
 from SkiLib.log import get_logger
 from SkiLib.metatools.informative import get_tools as get_info_tools
 from SkiLib.registry import SkillRegistry
+from SkiLib.scenes.fmb import ASSEMBLY_REFERENCE_PATH
 
 logger = get_logger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-_ASSEMBLY_REFERENCE = Path(__file__).resolve().parents[2] / "SkiLib" / "genesis" / "assembly.md"
+_ASSEMBLY_REFERENCE = ASSEMBLY_REFERENCE_PATH
 
 
 def _load_prompt(name: str) -> str:

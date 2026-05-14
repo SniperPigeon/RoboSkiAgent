@@ -58,7 +58,7 @@ def compute_pick_pose(item_name: str, grasp_profile: str = "default") -> dict:
     Args:
         item_name: Genesis scene object name (e.g. 'Gear_Large_1').
         grasp_profile: Symbolic grasp profile, usually "default". Valid values
-            are documented in SkiLib/genesis/assembly.md and validated by code.
+            are documented in SkiLib/scenes/fmb/assembly.md and validated by code.
 
     Returns:
         {

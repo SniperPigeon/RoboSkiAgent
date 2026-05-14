@@ -24,6 +24,7 @@ from SkiLib.genesis.assembly_specs import (
     tcp_yaw_for_object_yaw,
 )
 from SkiLib.genesis.types import GenesisSceneBundle, SceneObject, SceneTarget, TargetPose
+from SkiLib.scenes.fmb.scene_config import load_fmb_scene_spec
 
 RES_DIR = Path(__file__).resolve().parents[2] / "res"
 FMB_DIR = RES_DIR / "fmb" / "processed"
@@ -33,38 +34,40 @@ def robot_urdf_path() -> Path:
     path = Path(ROBOT_URDF).expanduser()
     return path if path.is_absolute() else RES_DIR / path
 
-# ── Table / robot constants ───────────────────────────────────────────────────
-TABLE_H   = 0.72
-TABLE_CX  = 0.5
-TABLE_SIZE_X = 1.6
-TABLE_SIZE_Y = 0.9
-ROBOT_X   = 0.25
+# ── FMB scene constants loaded from SkiLib/scenes/fmb/scene.yaml ─────────────
+FMB_SCENE_SPEC = load_fmb_scene_spec()
 
-# ── FMB scene constants ───────────────────────────────────────────────────────
-FMB_BOARD_X = 0.78
-FMB_BOARD_Y = 0.00
-FMB_STAGE_Y = 0.28
+TABLE_H = FMB_SCENE_SPEC.table_height_m
+TABLE_CX = FMB_SCENE_SPEC.table_center_x_m
+TABLE_SIZE_X = FMB_SCENE_SPEC.table_size_x_m
+TABLE_SIZE_Y = FMB_SCENE_SPEC.table_size_y_m
+ROBOT_X = FMB_SCENE_SPEC.robot_x_m
+
+FMB_BOARD_X = FMB_SCENE_SPEC.board_x_m
+FMB_BOARD_Y = FMB_SCENE_SPEC.board_y_m
+FMB_STAGE_Y = FMB_SCENE_SPEC.stage_y_m
+FMB_PARTS = tuple(FMB_SCENE_SPEC.parts.keys())
 FMB_PART_STAGE_X = {
-    "Part_A_1": 0.54,
-    "Part_A_2": 0.68,
-    "Part_B": 0.82,
-    "Part_C": 0.98,
+    name: part.stage_x_m for name, part in FMB_SCENE_SPEC.parts.items()
 }
-
-# Meshes were normalized to metres with bottom-centre origins in res/fmb/processed.
+FMB_PART_MESH = {
+    name: part.mesh for name, part in FMB_SCENE_SPEC.parts.items()
+}
+FMB_PART_COLOR = {
+    name: part.color for name, part in FMB_SCENE_SPEC.parts.items()
+}
 FMB_PART_HEIGHT = {
-    "Part_A_1": 0.100,
-    "Part_A_2": 0.100,
-    "Part_B": 0.037,
-    "Part_C": 0.100,
+    name: part.height_m for name, part in FMB_SCENE_SPEC.parts.items()
 }
 FMB_PART_REF_Z_FROM_BOTTOM = {
-    "Part_A_1": 0.044138,
-    "Part_A_2": 0.044138,
-    "Part_B": 0.018500,
-    "Part_C": 0.039964,
+    name: part.ref_z_from_bottom_m for name, part in FMB_SCENE_SPEC.parts.items()
 }
-FMB_PARTS = ("Part_A_1", "Part_A_2", "Part_B", "Part_C")
+FMB_PLACE_XY = {
+    name: part.place_xy_m for name, part in FMB_SCENE_SPEC.parts.items()
+}
+FMB_PLACE_BOTTOM_Z = {
+    name: part.place_bottom_z_m for name, part in FMB_SCENE_SPEC.parts.items()
+}
 
 def fmb_grasp_z_from_bottom(name: str, height: float | None = None) -> float:
     """Return the preferred finger-contact height from a part's bottom."""
@@ -74,21 +77,6 @@ def fmb_grasp_z_from_bottom(name: str, height: float | None = None) -> float:
     return float(min(grasp_z, max_grasp_z))
 
 
-# Approximate assembly locations from the original Board 1 STEP body positions,
-# expressed relative to teasor_board's centre.  teasor_board is the central tray; the
-# remaining four bodies are staged as pickable parts.
-FMB_PLACE_XY = {
-    "Part_A_1": (FMB_BOARD_X - 0.068, FMB_BOARD_Y),
-    "Part_A_2": (FMB_BOARD_X + 0.068, FMB_BOARD_Y),
-    "Part_B": (FMB_BOARD_X, FMB_BOARD_Y),
-    "Part_C": (FMB_BOARD_X, FMB_BOARD_Y),
-}
-FMB_PLACE_BOTTOM_Z = {
-    "Part_A_1": TABLE_H + 0.005,
-    "Part_A_2": TABLE_H + 0.005,
-    "Part_B": TABLE_H + 0.040,
-    "Part_C": TABLE_H + 0.005,
-}
 # Backward-compatible maps. New code should read assembly_specs.py, where
 # expected_object_yaw_deg is the final object yaw and grasp profiles define TCP
 # yaw offsets symbolically.
@@ -99,9 +87,9 @@ FMB_PICK_YAW_DEG = {
 }
 
 # Backward-compatible name used by runtime.compute_pick_pose().
-GEAR_THICKNESS = 0.050
+GEAR_THICKNESS = FMB_SCENE_SPEC.gear_thickness_m
 
-APPROACH_CLEARANCE = 0.14   # TCP lifts this far above pick/place before transiting
+APPROACH_CLEARANCE = FMB_SCENE_SPEC.approach_clearance_m
 
 _GENESIS_INITIALIZED = False
 _URDF_TOOL_OFFSET_CACHE: float | None = None
@@ -437,13 +425,13 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
     # ── FMB teaser board (fixed assembly platform) ────────────────────────────
     scene.add_entity(
         gs.morphs.Mesh(
-            file=str(FMB_DIR / "teasor_board.stl"),
+            file=str(FMB_DIR / FMB_SCENE_SPEC.board_mesh),
             fixed=True,
             pos=(FMB_BOARD_X, FMB_BOARD_Y, TABLE_H),
             decimate=False,
             convexify=False,
         ),
-        surface=gs.surfaces.Default(color=(0.30, 0.40, 0.60, 1.0)),
+        surface=gs.surfaces.Default(color=FMB_SCENE_SPEC.board_color),
     )
 
     # ── FMB parts (dynamic, staged beside the board) ──────────────────────────
@@ -458,10 +446,10 @@ def build_genesis_scene(show_viewer: bool = False) -> GenesisSceneBundle:
             surface=gs.surfaces.Default(color=color),
         )
 
-    part_a_1 = _add_part("Part_A_1", "part_A_1.stl", (0.20, 0.70, 0.80, 1.0))
-    part_a_2 = _add_part("Part_A_2", "part_A_2.stl", (0.65, 0.35, 0.75, 1.0))
-    part_b = _add_part("Part_B", "part_B.stl", (0.90, 0.75, 0.20, 1.0))
-    part_c = _add_part("Part_C", "part_C.stl", (0.85, 0.45, 0.20, 1.0))
+    part_a_1 = _add_part("Part_A_1", FMB_PART_MESH["Part_A_1"], FMB_PART_COLOR["Part_A_1"])
+    part_a_2 = _add_part("Part_A_2", FMB_PART_MESH["Part_A_2"], FMB_PART_COLOR["Part_A_2"])
+    part_b = _add_part("Part_B", FMB_PART_MESH["Part_B"], FMB_PART_COLOR["Part_B"])
+    part_c = _add_part("Part_C", FMB_PART_MESH["Part_C"], FMB_PART_COLOR["Part_C"])
 
     # ── Build + PD init ───────────────────────────────────────────────────────
     scene.build()
