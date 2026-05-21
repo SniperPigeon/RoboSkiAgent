@@ -14,65 +14,18 @@
 flowchart LR
     Operator["Operator / 自然语言输入"] -->|"assembly instruction"| UI["CLI / Gradio GUI"]
 
-    UI -->|"make_initial_state(prompt)"| Graph["Agent Layer<br/>LangGraph StateGraph<br/>graph_v2.py"]
+    UI -->|"make_initial_state(prompt)"| Agent["Agent Layer<br/>LangGraph StateGraph<br/>graph_v2.py"]
+    Agent -->|"create_llm()"| LLM["LLM Provider<br/>Claude / llama.cpp / Ollama"]
+    Agent -->|"symbolic planning + skill execution"| SkiLib["SkiLib<br/>skill library / metatools / sensors / primitives"]
+    SkiLib -->|"robot commands + state queries"| Genesis["Genesis Backend<br/>runtime / scene / IK / physics"]
 
-    subgraph LLM["LLM Provider"]
-        Claude["Claude API<br/>Anthropic"]
-        LlamaCpp["llama.cpp<br/>OpenAI-compatible local server"]
-        Ollama["Ollama<br/>local chat model"]
-    end
+    AgentLightning["Agent Lightning / Trainer<br/>APO prompt optimization + rollout training"] -->|"wraps planning agent / collects rollouts"| Agent
+    AgentLightning -->|"uses task scores / rewards"| Tests["Tests + Benchmark<br/>plan scoring / executor eval / Genesis smoke tests"]
+    Tests -->|"exercise graph behavior"| Agent
+    Tests -->|"validate skills + runtime"| SkiLib
+    Tests -->|"smoke-test scene + motion"| Genesis
 
-    Graph -->|"create_llm()"| LLM
-
-    subgraph Agent["Agent Nodes"]
-        Supervisor["Supervisor<br/>符号场景理解"]
-        Planner["Planner V2<br/>skill-level todo_list"]
-        PlanReview["Plan Review<br/>human approval"]
-        Dispatcher["Dispatcher<br/>task slotting"]
-        Executor["Executor V2<br/>skill.md -> primitives/sensors"]
-        Manual["Manual Handler<br/>operator action"]
-        HITL["HITL Handler<br/>retry / replan / abort"]
-    end
-
-    Graph --> Agent
-
-    subgraph SkiLib["SkiLib"]
-        RobotContext["RobotContext<br/>Genesis facade"]
-        SkillMdLoader["SkillMdLoader<br/>loads skills/*.md"]
-        SkillRegistry["SkillRegistry<br/>legacy Python skills"]
-        PrimitiveRegistry["PrimitiveRegistry<br/>MoveJ MoveL Grasp Release"]
-        SensorRegistry["SensorRegistry<br/>execution-time perception"]
-        MetaTools["metatools<br/>symbolic scene info"]
-    end
-
-    Supervisor -->|"list_targets/list_objects/list_assembly_recipe"| MetaTools
-    Planner -->|"loads skill schemas"| SkillMdLoader
-    Executor -->|"loads skill body"| SkillMdLoader
-    Executor -->|"action tools"| PrimitiveRegistry
-    Executor -->|"check tools"| SensorRegistry
-    RobotContext --> PrimitiveRegistry
-    RobotContext --> SensorRegistry
-    RobotContext --> SkillRegistry
-
-    subgraph GenesisLayer["Genesis Backend"]
-        Runtime["GenesisRuntime<br/>scene objects targets tools"]
-        Scene["build_genesis_scene()<br/>UR16e + Robotiq + FMB objects"]
-        Motion["motion.py<br/>IK + PD control"]
-        Controller["GenesisController<br/>viewer thread serializer"]
-        Genesis["Genesis Physics Engine<br/>gs.Scene / robot"]
-    end
-
-    RobotContext --> Runtime
-    Runtime --> Scene
-    PrimitiveRegistry --> Motion
-    SensorRegistry -->|"read state / object pose"| Runtime
-    Motion -->|"scene.step()"| Runtime
-    Controller -.->|"viewer mode serializes step()"| Runtime
-    Runtime --> Genesis
-
-    Operator <-.->|"approve / complete / retry / replan"| PlanReview
-    Operator <-.-> Manual
-    Operator <-.-> HITL
+    Operator <-.->|"plan review / manual completion / recovery decision"| Agent
 ```
 
 ### 说明
@@ -83,6 +36,8 @@ flowchart LR
 - `LLM Provider` 由 `Agent/llm.py` 选择，可使用 Claude API、Ollama，或 llama.cpp 的 OpenAI-compatible server。
 - `SkiLib` 不依赖 LangGraph，负责技能、primitive、sensor、场景符号解析。
 - `GenesisRuntime` 持有实际 Genesis scene、robot、objects、targets 和 held-item 状态。
+- `Agent Lightning / Trainer` 覆盖 `trainer/apoptimizer/` 和 `agldemo/` 一类训练入口，用于 APO prompt optimization、rollout collection 和 reward-driven 迭代。
+- `Tests + Benchmark` 覆盖 `tests/benchmark/`、`tests/genesis_motion_smoke.py` 等验证入口，用来评估规划质量、executor 行为和 Genesis 运动链路。
 
 ## 2. 简略 Agent Flow
 
@@ -90,48 +45,44 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Start([Start: user prompt]) --> Supervisor["Supervisor<br/>scene-symbol saturation<br/>任务意图改写 + 可用符号"]
+    Start["Natural language task<br/>operator intent"] --> Planning
 
-    Supervisor -->|"ok"| Planner["Planner V2<br/>LLM tool calls:<br/>add_PickAndPlace_task / add_manual_task"]
-    Supervisor -->|"abort / timeout"| End([End])
+    subgraph PlanLayer["Supervisor + Planner Layer"]
+        Planning["Task understanding + symbolic planning<br/>clarify intent, gather scene symbols,<br/>produce skill-level todo_list"]
+    end
 
-    Planner --> PlanReview["Plan Review Interrupt<br/>operator reviews todo_list"]
+    subgraph ExecLayer["Execution / Interaction Layer"]
+        Dispatch["Task orchestration<br/>select next automatic or manual task"]
+        Execute["Skill execution<br/>expand skill.md into primitives<br/>run action and sensor checks"]
+        Recover["Failure recovery<br/>use primitives + sensors to retry or repair"]
+        Manual["Manual interaction<br/>operator completes non-robotic steps"]
+    end
 
-    PlanReview -->|"approve"| Dispatcher["Dispatcher<br/>pop next task into current_task"]
-    PlanReview -->|"replan + feedback"| Supervisor
-    PlanReview -->|"abort"| End
+    Planning -->|"plan review approves todo_list"| Dispatch
+    Planning -.->|"review feedback requests replan"| Planning
+    Planning -->|"review abort / planning timeout"| End([End])
 
-    Dispatcher -->|"auto task"| ExecutorPlan["Executor V2: Plan Phase<br/>read skill.md<br/>register_execution_plan<br/>action + check steps"]
-    Dispatcher -->|"manual task"| Manual["Manual Handler Interrupt"]
-    Dispatcher -->|"no task"| End
+    Dispatch -->|"automatic robotic task"| Execute
+    Dispatch -->|"manual task"| Manual
+    Dispatch -->|"todo_list complete"| End
 
-    Manual -->|"complete"| Dispatcher
-    Manual -->|"abort"| End
+    Execute -->|"task completed"| Dispatch
+    Execute -->|"execution or check fails"| Recover
+    Manual -->|"operator completion"| Dispatch
 
-    ExecutorPlan --> ExecutorRun["Executor V2: Run Phase<br/>execute primitives<br/>run sensor checks"]
-    ExecutorRun -->|"all steps success"| Dispatcher
-
-    ExecutorRun -->|"step/check failure"| Recovery["Executor V2: Recovery Phase<br/>LLM sub-agent uses primitives + sensors"]
-    Recovery -->|"recovered"| Dispatcher
-    Recovery -->|"unrecoverable / timeout / escalate"| HITL["HITL Handler Interrupt"]
-
-    HITL -->|"retry same task"| ExecutorPlan
-    HITL -->|"next_task"| Dispatcher
-    HITL -->|"replan"| Supervisor
-    HITL -->|"abort"| End
+    Recover -->|"automatic recovery succeeds"| Dispatch
+    Recover -.->|"HITL chooses retry / skip / replan / abort"| Dispatch
+    Recover -.->|"HITL requests replan"| Planning
+    Recover -->|"abort"| End
 ```
 
 ### 说明
 
-- `Supervisor` 只做 planning-time symbolic information gathering，不应该依赖物理坐标。
-- `Planner V2` 使用 `SkillMdLoader` 从 `skills/*.md` 生成 tool schema，然后通过 LLM tool calls 写入 `todo_list`。
-- `Plan Review` 是强制 human gate：operator 可以 approve、replan 或 abort。
-- `Dispatcher` 一次只把一个 task 放入 `current_task`。
-- `Executor V2` 分三阶段：
-  - Plan phase：把高层 skill 变成 primitive/check execution plan。
-  - Run phase：按顺序执行 primitives 和 sensors。
-  - Recovery phase：失败时启动 LLM sub-agent，使用 primitives/sensors 尝试恢复。
-- `HITL Handler` 处理无法自动恢复的失败，可 retry、跳过任务、replan 或 abort。
+- `Supervisor + Planner Layer` 负责把自然语言任务转成可执行的 skill-level `todo_list`：先做符号场景理解，再生成任务序列。
+- Plan review 是 planning layer 和 execution layer 之间的 human gate：operator 可以 approve、要求 replan，或直接 abort。
+- `Execution / Interaction Layer` 负责把 `todo_list` 落到当前任务：自动任务进入 skill execution，人工任务进入 manual interaction。
+- Skill execution 关注两件事：根据 `skill.md` 展开 primitive 动作，并用 sensors 做执行后检查。
+- Failure recovery 先尝试自动修复；无法确认时通过 HITL 箭头表达人工选择 retry、skip、replan 或 abort。
 
 ## 3. 分层 Skill / Tool 图
 
@@ -139,88 +90,84 @@ flowchart TD
 
 ```mermaid
 flowchart TB
-    NL["Natural Language Task<br/>例: assemble / pick and place"] --> SupLayer
+    NL["Natural Language Task<br/>例: assemble / pick and place"] --> PlanningInfo
 
-    subgraph SupLayer["Planning Information Layer"]
-        Meta["Informative T-skills<br/>metatools/informative.py"]
-        ListRecipe["list_assembly_recipe<br/>装配计划/默认装配顺序获取"]
-        ListTargets["list_targets"]
-        ListObjects["list_objects"]
-        ListTools["list_tools"]
-        CheckExists["check_item_exists"]
-        GripStatePlan["get_gripper_state<br/>symbolic only"]
+    subgraph PlanningLayer["Planning Information Layer"]
+        PlanningInfo["Symbolic scene information<br/>available objects, targets, tools,<br/>assembly recipe, symbolic gripper state"]
     end
 
-    Meta --> ListRecipe
-    Meta --> ListTargets
-    Meta --> ListObjects
-    Meta --> ListTools
-    Meta --> CheckExists
-    Meta --> GripStatePlan
-
-    SupLayer --> PlannerLayer["Planner Layer<br/>生成 skill-level todo_list"]
+    PlanningInfo --> PlannerLayer["Planner Layer<br/>generate skill-level todo_list"]
 
     subgraph SkillLayer["Robotic Skill Layer"]
-        MdSkill["skill.md spec<br/>SkiLib/skills/pick_and_place.md"]
-        PickPlace["PickAndPlace<br/>item, home_position,<br/>pick/place approach/target,<br/>motion mode, grasp_profile"]
-        PySkill["legacy Python BaseSkill<br/>SkiLib/skills/*.py"]
+        SkillSpec["Skill specification<br/>skills/*.md schemas + execution guide"]
+        SkillTask["Skill task instance<br/>PickAndPlace parameters:<br/>item, targets, motion mode, grasp profile"]
+        LegacySkill["Legacy Python skills<br/>V1 compatibility path"]
     end
 
-    PlannerLayer -->|"add_PickAndPlace_task"| PickPlace
-    MdSkill --> PickPlace
-    PySkill -.->|"V1 compatibility"| PickPlace
+    PlannerLayer -->|"tool call creates task"| SkillTask
+    SkillSpec -->|"defines parameters + behavior"| SkillTask
+    LegacySkill -.->|"compatibility"| SkillTask
 
-    PickPlace --> ExecLayer["Executor V2<br/>skill guide -> concrete execution plan"]
+    SkillTask --> ExecLayer["Executor V2<br/>expand skill guide into<br/>action steps + check steps + recovery policy"]
 
-    subgraph PerceptionLayer["Perception / Sensor Layer"]
-        Attach["get_attachment_state"]
-        IsGrasped["is_item_grasped"]
-        ObjPos["get_object_position<br/>position + is_placed"]
-        IsPlaced["is_placed"]
-        PickPose["compute_pick_pose<br/>dynamic recovery pick target"]
+    subgraph RuntimeToolLayer["Runtime Tool Layer"]
+        Perception["Perception / sensors<br/>attachment, grasp, placement,<br/>object pose, recovery pick pose"]
+        Primitives["Primitives<br/>MoveJ / MoveL / Grasp / Release"]
     end
 
-    ExecLayer -->|"post-action checks / recovery"| PerceptionLayer
+    ExecLayer -->|"action steps"| Primitives
+    ExecLayer -->|"checks + recovery observations"| Perception
 
-    subgraph PrimitiveLayer["Primitive Layer"]
-        MoveJ["MoveJ<br/>joint-space motion"]
-        MoveL["MoveL<br/>Cartesian linear motion"]
-        Grasp["Grasp<br/>weld constraint attach"]
-        Release["Release<br/>detach / place"]
+    subgraph GenesisLayer["Genesis Runtime Layer"]
+        Runtime["GenesisRuntime<br/>symbol resolution + physics state"]
+        Motion["Motion control<br/>IK + control_to_qpos + scene.step()"]
     end
 
-    ExecLayer -->|"action steps"| PrimitiveLayer
+    Primitives -->|"resolve symbols + command robot"| Runtime
+    Primitives -->|"motion primitives"| Motion
+    Perception -->|"read object / gripper state"| Runtime
+    Motion -->|"advance simulation"| Runtime
+```
 
-    subgraph RuntimeLayer["Genesis Runtime Layer"]
-        Resolver["Symbol Resolver<br/>target/object/tool names"]
-        IK["solve_ik"]
-        Control["control_to_qpos"]
-        State["physics state<br/>object pose / held_item / gripper"]
-        SceneStep["scene.step()"]
+### Skill Library 简略结构
+
+这张图按使用者组织 `SkiLib`：Planner Layer 周围是 planning-time symbolic tools 和 skill schemas；Execution Layer 周围是执行指南、primitives、sensors 和 Genesis runtime adapter。
+
+```mermaid
+flowchart LR
+    Planner["Planner Layer<br/>build skill-level todo_list"]
+    Execution["Execution Layer<br/>expand and run selected skill"]
+
+    subgraph PlanningSkills["Planner-facing SkiLib capabilities"]
+        MetaTools["metatools/informative.py<br/>symbolic scene T-skills"]
+        SkillSchemas["SkillMdLoader + skills/*.md<br/>planner tool schemas"]
+        LegacyPlanning["skills/*.py<br/>legacy V1 compatibility"]
     end
 
-    MoveJ --> Resolver
-    MoveL --> Resolver
-    Grasp --> Resolver
-    Release --> Resolver
+    subgraph ExecutionSkills["Execution-facing SkiLib capabilities"]
+        SkillGuides["skills/*.md<br/>execution guide + recovery policy"]
+        Primitives["primitives/*.py<br/>MoveJ / MoveL / Grasp / Release"]
+        Sensors["sensors/*.py<br/>gripper / placement / pick recovery"]
+        RuntimeAdapter["RobotContext + genesis/*<br/>symbol resolution, IK, scene state"]
+    end
 
-    MoveJ --> IK
-    MoveL --> IK
-    IK --> Control
-    Control --> SceneStep
-    Grasp --> State
-    Release --> State
-    PerceptionLayer --> State
-    PickPose --> Resolver
+    Planner -->|"planning-time use"| MetaTools
+    Planner -->|"planning-time use"| SkillSchemas
+    Planner -.->|"compatibility"| LegacyPlanning
+    Planner -->|"todo_list skill task"| Execution
+
+    Execution -->|"execution-time use"| SkillGuides
+    Execution -->|"execution-time use"| Primitives
+    Execution -->|"execution-time use"| Sensors
+    Execution -->|"runtime boundary"| RuntimeAdapter
 ```
 
 ### 说明
 
 - `Planning Information Layer` 是 Supervisor 使用的 T-skills，核心约束是只返回符号信息，不暴露坐标、矩阵或关节值。
-- `Robotic Skill Layer` 当前生产技能主要是 `PickAndPlace`。V2 通过 `SkiLib/skills/pick_and_place.md` 描述参数、标准执行序列、验证点和恢复策略。
-- `Perception / Sensor Layer` 是 Executor 的 execution-time observation tools，可读取物理状态，例如是否抓住、是否放置成功、物体当前位置和动态 pick pose。
-- `Primitive Layer` 是平台绑定的低层动作，目前包括 `MoveJ`、`MoveL`、`Grasp`、`Release`。
-- `Genesis Runtime Layer` 负责符号解析、IK、控制循环、`scene.step()` 和物理状态维护。
+- `Robotic Skill Layer` 表示可被 Planner 生成、可被 Executor 展开的高层技能任务；V2 主要由 `skills/*.md` 描述参数、执行指南、验证点和恢复策略。
+- `Runtime Tool Layer` 是 Executor 的实际工具面：primitives 负责动作，sensors 负责执行时观察和恢复判断。
+- `Genesis Runtime Layer` 是底层模拟依赖边界，集中处理符号解析、IK / control loop、`scene.step()` 和物理状态维护。
 
 ## 当前主线摘要
 
