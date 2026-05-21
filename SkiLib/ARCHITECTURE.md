@@ -1,5 +1,219 @@
 # SkiLib 架构设计
 
+> **迭代说明**：本文档原描述 RoboDK 后端架构（见文末"历史参考"章节），当前实现已完整迁移至 Genesis。下方各节描述现状。
+
+---
+
+## 当前实现：Genesis 后端（2026-05-08，含 V2 双轨技能体系）
+
+### 架构总览
+
+```mermaid
+graph TB
+    subgraph Agent["Agent Layer (LangGraph)"]
+        EXE["🤖 Executor V2\nnodes/executor_v2.py\n(plan→execute→recover)"]
+        SUP["🔍 Supervisor\nnodes/supervisor.py"]
+    end
+
+    subgraph SkiLib["SkiLib · Skill Library (no LangGraph dependency)"]
+        subgraph Reg["Registry / Context"]
+            SR["SkillRegistry\nauto-scans skills/*.py (V1)"]
+            SML["SkillMdLoader\nauto-scans skills/*.md (V2)"]
+            RC["RobotContext\nGenesis singleton"]
+        end
+        subgraph Skills["Skills · platform-agnostic"]
+            PaP_py["PickAndPlace.py\nV1: Python 10-step sequence"]
+            PaP_md["pick_and_place.md\nV2: LLM execution guide + check steps"]
+        end
+        subgraph Prims["Primitives · Genesis-bound"]
+            MJ["MoveJ"] & ML["MoveL"]
+            GR["Grasp"] & RE["Release"]
+        end
+        subgraph SensorLayer["Sensors · execution-time physical queries"]
+            SReg["SensorRegistry\nauto-scans sensors/*.py"]
+            SGrip["sensors/gripper.py\nget_attachment_state / is_item_grasped"]
+            SPlace["sensors/placement.py\nget_object_position (is_placed)"]
+        end
+        subgraph Meta["metatools/ · planning-time symbolic queries"]
+            INFO["informative.py\nlist_targets / list_objects / get_gripper_state\n(Supervisor T-skills, no coordinates)"]
+        end
+        subgraph Genesis["SkiLib/genesis/"]
+            GRT["GenesisRuntime\nscene + registries\n+ get_object_position()"]
+            GSC["build_genesis_scene()\nUR16e + objects + targets"]
+            GMO["motion.py\nsolve_ik / control_to_qpos"]
+            GCT["GenesisController\nmacOS thread serializer"]
+        end
+    end
+
+    GS(["⚙️ Genesis Physics Engine\ngs.Scene / gs.Robot"])
+
+    EXE -->|"V1: get_skill(name)"| SR
+    EXE -->|"V2: get_spec(name)"| SML
+    EXE -->|"plan check steps"| SReg
+    SUP -->|"T-skills (planning)"| INFO
+    SR --> PaP_py
+    SML --> PaP_md
+    PaP_py & PaP_md --> MJ & ML & GR & RE
+    SReg --> SGrip & SPlace
+    SGrip & SPlace -->|"read physics state"| GRT
+    RC --> GRT
+    MJ & ML & GR & RE -->|"solve_ik / control_to_qpos"| GMO
+    GMO -->|"scene.step()"| GRT
+    GRT --> GS
+    GCT -.->|"序列化 step() 到主线程"| GRT
+
+    style Agent fill:#dbeafe,stroke:#3b82f6
+    style Skills fill:#d1fae5,stroke:#10b981
+    style Prims fill:#fce7f3,stroke:#ec4899
+    style Reg fill:#fef3c7,stroke:#f59e0b
+    style Genesis fill:#ede9fe,stroke:#7c3aed
+    style SensorLayer fill:#fff7ed,stroke:#f97316
+    style Meta fill:#f0fdf4,stroke:#16a34a
+```
+
+### 两个工具层的定位区别
+
+| 层 | 路径 | 调用方 | 规则 |
+|----|------|--------|------|
+| **metatools** | `metatools/informative.py` | Supervisor（规划阶段） | 只返回符号名，禁止坐标 |
+| **sensors** | `sensors/*.py` | Executor V2 plan check / recovery | 可返回物理量（距离、布尔状态） |
+
+> **设计意图**：Supervisor 永远只看符号，Executor 在执行和恢复时可以读取物理量用于判断和纠错。
+
+### 关键组件
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| `GenesisRuntime` | `genesis/runtime.py` | 场景单例，持有 scene/robot/targets/objects 注册表；`get_object_position()` 三维验证（XY 距离 + Z 高度 + 圆盘倾斜角） |
+| `build_genesis_scene()` | `genesis/scene.py` | 工厂：加载 URDF，创建 UR16e + Robotiq 2F-85 + 零件 + 目标点 |
+| `solve_ik()` | `genesis/motion.py` | 包装 `robot.inverse_kinematics()`，返回 `IKResult` |
+| `control_to_qpos()` | `genesis/motion.py` | PD 控制循环，最多 `max_steps` 次 `scene.step()` |
+| `GenesisController` | `genesis/controller.py` | 把所有 `scene.step()` 序列化到单一线程（macOS viewer 限制） |
+| `RobotContext` | `robotcontext.py` | 单例门面，名称不变以保持上游调用兼容；代理 `get_object_position()` |
+| `SkillMdLoader` | `skill_loader.py` | V2 技能加载器：解析 `skills/*.md`，生成 Pydantic schema，暴露 `body` 给 Executor |
+| `SensorRegistry` | `sensors/__init__.py` | 自动发现 `sensors/*.py`，汇聚所有 sensor tools 供 Executor V2 使用 |
+| `sensors/gripper.py` | `sensors/gripper.py` | 执行时夹爪状态查询：`get_attachment_state` / `is_item_grasped` |
+| `sensors/placement.py` | `sensors/placement.py` | 执行时放置验证：`get_object_position` → `is_placed`（XY + Z + 倾斜角三重检测，容差见 `genesis/config.py`） |
+| `sensors/pick.py` | `sensors/pick.py` | Recovery 动态拾取：`compute_pick_pose` 读实时物理位置，注册临时 target 供 MoveL 使用，`reset()` 时自动清理 |
+
+---
+
+### 仿真入口与运行模式
+
+#### 进入仿真
+
+| 命令 | viewer | 模式 |
+|------|--------|------|
+| `ROBOSKI_GENESIS_VIEWER=1 python -m Agent.gui` | ✅ | 交互 GUI + 实时可视化 |
+| `python -m Agent.gui` | ❌ headless | 交互 GUI，无 viewer |
+| `python -m Agent "把零件放到目标点"` | ❌ headless | CLI 单次运行（V2 graph） |
+| `python res/genesis_scene_test.py` | ✅ | 裸场景测试，无 Agent |
+| `python SkiLib/main.py` | ❌ | T-skills 调试，无 Agent |
+
+**环境变量**
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `ROBOSKI_GENESIS_VIEWER` | `0` | `1` 开启 viewer |
+| `ROBOSKI_GENESIS_BACKEND` | `cpu` | `cpu` / `gpu` |
+| `ROBOSKI_SKIP_CHECK` | 未设 | `1` 跳过 IK/碰撞检查 |
+
+#### `scene.step()` 的两种驱动方式
+
+**有 viewer（GUI）**
+```
+主线程：GenesisController.run()
+  ├─ 有任务：执行 fn() → scene.step()
+  └─ 空闲：hold position → scene.step()   ← ~60 fps 实时循环
+后台线程：Gradio + LangGraph Agent
+```
+
+**无 viewer（CLI/headless）**
+```
+没有空跑循环。scene.step() 只在 primitive 执行期间被
+control_to_qpos() 驱动（最多 240 步 / primitive）。
+```
+
+---
+
+### LLM RL 后训练兼容性分析
+
+> 这里讨论的是用 Genesis 作为 **reward oracle**，对 LLM Agent 进行 RL 后训练（GRPO / PPO / REINFORCE 等），而不是训练运动控制 policy。
+
+#### 适合做什么
+
+用 Genesis 环境验证 LLM 生成的装配计划是否真实可执行，将任务成功/失败作为稀疏 reward 信号，反向更新 LLM 权重（类似 DeepSeek-R1 / Tulu 中的 process reward）。
+
+```
+LLM 采样 N 条 rollout（自然语言计划 → tool calls）
+       ↓
+Genesis 执行每条 rollout，返回 success / error_type / steps_taken
+       ↓
+reward = success_flag ± shaping（可选：步骤数惩罚、IK 失败惩罚等）
+       ↓
+GRPO / PPO 更新 LLM 权重
+```
+
+#### 现有架构对这个流程的支持程度
+
+**已经兼容 ✅**
+
+- `SkillResult.success` / `error_type` / `suggestion` 已是结构化 reward 信号，不需要额外包装
+- `GenesisRuntime` 是纯 Python 对象，可在子进程/线程中独立实例化，适合并发 rollout
+- `build_genesis_scene()` 是无副作用工厂函数，每次调用建立独立场景，适合多环境并行
+- `_GENESIS_INITIALIZED` 全局锁已处理重复 `gs.init()` 问题，多进程时各进程独立初始化不冲突
+- Primitives 的 `try_execute()` 已捕获所有异常并返回 `SkillResult`，不会让 rollout worker crash
+
+**需要改造 ⚠️**
+
+1. **rollout 需要 scene reset**
+
+   当前无 `reset()` 方法。每个 episode 需要重建场景（重新调用 `build_genesis_scene()`），开销较高。
+   
+   **建议**：在 `GenesisRuntime` 中增加 `reset()` 方法，通过 `robot.set_dofs_position(home_qpos)` + `entity.set_pos()` 复位，避免重建 scene。
+
+2. **GenesisController 线程模型不适合多进程 rollout**
+
+   RL rollout 通常用多进程（`multiprocessing` 或 Ray worker），而 `GenesisController` 是单进程内的线程序列化器。多进程场景下每个 worker 应拥有自己的 `GenesisRuntime`，不需要 `GenesisController`（无 viewer）。
+
+3. **rollout worker 应以 headless 模式运行**
+
+   ```python
+   # rollout worker 的正确初始化方式
+   os.environ["ROBOSKI_GENESIS_VIEWER"] = "0"
+   runtime = GenesisRuntime(show_viewer=False)
+   # 直接调用 primitive，不走 GenesisController
+   ```
+
+4. **reward shaping 需要新增中间信号**
+
+   `SkillResult` 目前缺少：执行步数、IK 求解迭代次数、末端轨迹长度等 dense reward 候选项。可在 `control_to_qpos()` 返回值中附加这些信息。
+
+#### 推荐的 rollout 收集架构（供参考）
+
+```
+训练进程（LLM + GRPO trainer）
+   │
+   ├─ rollout_worker_0 (subprocess)
+   │     └─ GenesisRuntime(headless) + SkillRegistry
+   │         执行 LLM plan → 返回 (plan, reward, trace)
+   │
+   ├─ rollout_worker_1
+   │     └─ GenesisRuntime(headless) + SkillRegistry
+   │
+   └─ ... × N workers
+```
+
+各 worker 无 viewer、无 `GenesisController`，`scene.step()` 直接由 `control_to_qpos()` 驱动，性能最优。
+
+---
+
+## 历史参考：原 RoboDK 架构（已废弃）
+
+> 以下内容描述 Genesis 迁移前的 RoboDK 架构，保留以记录迭代过程。
+
+---
+
 ## 🎯 核心设计原则
 
 ### 1️⃣ 分层解耦
@@ -72,8 +286,8 @@ primitives = context.primitives  # 快捷访问所有primitives
 - 集中管理primitive生命周期
 
 **自动发现规则**:
-1. 扫描整个 `SkiLib/primitives/` 文件夹（跳过以 `_` 开头的文件）
-2. 查找所有 `BasePrimitive` 子类（精确匹配 `cls.__module__ == module_name` 防止外部导入误注册）
+1. 扫描 `SkiLib.primitives.motion` 模块（可扩展到整个文件夹）
+2. 查找所有 `BasePrimitive` 子类
 3. 自动实例化并注册到字典
 
 **扩展方式**:
@@ -111,24 +325,20 @@ all_primitives = context.primitive_registry.get_all()
 ```python
 class MoveJ(BasePrimitive):
     def __init__(self, robot_object, RDK_object):
-        self.robot = robot_object
-        self.RDK   = RDK_object
-
-    def check(self, target, ref_frame=None) -> SkillResult:
+        super().__init__(robot_object, RDK_object)
+    
+    def check(self, target, ref_frame=None) -> CheckResult:
         # 检查逻辑（碰撞、IK、关节限位等）
         pass
-
-    @require_robot_active
-    def execute(self, target, ref_frame=None) -> SkillResult:
-        # 执行逻辑；内部异常全部捕获，禁止向上抛出
+    
+    def execute(self, target, ref_frame=None):
+        # 执行逻辑
         pass
-
-    def try_execute(self, target, ref_frame=None) -> SkillResult:
+    
+    def try_execute(self, target, ref_frame=None):
         # check + execute
         pass
 ```
-
-> **注意**：`BasePrimitive.__init__` 不接受参数（抽象基类），各 Primitive 子类直接在 `__init__` 中赋值 `self.robot` / `self.RDK`，无需调用 `super().__init__()`。
 
 **平台依赖**:
 - ✅ **允许** import robodk（底层实现必须依赖平台）
@@ -280,61 +490,77 @@ def test_pick_and_place():
 
 ### 添加新Primitive
 ```python
-# 1. 在 SkiLib/primitives/my_primitive.py 创建文件
+# 1. 在 SkiLib/primitives/ 下新建文件，例如 SkiLib/primitives/gripper.py
+from robodk import robolink
+from typing import Optional
 from SkiLib.base import BasePrimitive, SkillResult, ExecutionPhase, require_robot_active
+from SkiLib.log import get_logger
 
-class MyPrimitive(BasePrimitive):
+logger = get_logger(__name__)
+
+class Grasp(BasePrimitive):
     def __init__(self, robot_object, RDK_object):
-        self.robot = robot_object
-        self.RDK   = RDK_object
+        super().__init__(robot_object, RDK_object)
 
-    def check(self, param: str) -> SkillResult:
-        # 前置检查逻辑
-        return SkillResult(success=True, execution_phase=ExecutionPhase.PLANNING)
+    def check(self, item: robolink.Item, tool: Optional[robolink.Item] = None) -> SkillResult:
+        if not item.Valid():
+            return SkillResult(success=False, execution_phase=ExecutionPhase.PLANNING, ...)
+        return SkillResult(success=True, execution_phase=ExecutionPhase.PLANNING, ...)
 
     @require_robot_active
-    def execute(self, param: str) -> SkillResult:
-        # 执行逻辑；内部异常全部捕获，返回 SkillResult，禁止向上抛出
-        ...
+    def execute(self, item: robolink.Item, tool: Optional[robolink.Item] = None) -> SkillResult:
+        try:
+            tool_item = tool or self.robot.getLink(ITEM_TYPE_TOOL)
+            attached = tool_item.AttachClosest()
+            # TODO [Real robot]: self.robot.setDO(port, 1); wait_for_feedback()
+            return SkillResult(success=True, execution_phase=ExecutionPhase.EXECUTION, ...)
+        except Exception as e:
+            logger.error("Grasp.execute raised %s.", type(e).__name__, exc_info=True)
+            return SkillResult(success=False, ...)
 
-    def try_execute(self, param: str) -> SkillResult:
-        check = self.check(param)
+    def try_execute(self, item: robolink.Item, tool: Optional[robolink.Item] = None) -> SkillResult:
+        check = self.check(item, tool)
         if not check.success:
             return check
-        return self.execute(param)  # type: ignore
+        return self.execute(item, tool)
 
 # 2. 重启程序，自动注册！
-# context.primitives['MyPrimitive'] 现在可用
+# context.primitives['Grasp'] 现在可用
 ```
+
+> **注意**：新代码一律使用 `SkillResult`，不得使用已废弃的 `CheckResult`。
 
 ### 添加新Skill
 ```python
 # 在 SkiLib/skills/inspection.py 创建文件
-from SkiLib.base import BaseSkill, CheckResult
+from SkiLib.base import BaseSkill, SkillResult
+from SkiLib.log import get_logger
+
+logger = get_logger(__name__)
 
 class Inspection(BaseSkill):
-    def __init__(self, moveJ, moveL, camera=None):
-        # 注意：NO robodk imports!
-        super().__init__(moveJ=moveJ, moveL=moveL, camera=camera)
-    
-    def check(self, waypoints):
-        # 检查所有路点可达性
-        for wp in waypoints:
-            if not self.primitives['moveJ'].check(wp).is_valid:
-                return CheckResult(is_valid=False, ...)
-        return CheckResult(is_valid=True)
-    
-    def execute(self, waypoints):
-        for wp in waypoints:
-            self.primitives['moveJ'].execute(wp)
-            # self.primitives['camera'].capture()
+    REQUIRED_PRIMITIVES = ['MoveJ']
+    # 注意：NO robodk imports in Skills!
 
-# 使用
-from SkiLib.skills.inspection import Inspection
-skill = Inspection(
-    moveJ=context.primitives['MoveJ'],
-    moveL=context.primitives['MoveL']
-)
+    def check(self, waypoints: list) -> SkillResult:
+        for wp in waypoints:
+            result = self.primitives['MoveJ'].check(wp)
+            if not result.success:
+                return result
+        return SkillResult(success=True, execution_phase=ExecutionPhase.PLANNING, ...)
+
+    def execute(self, waypoints: list) -> SkillResult:
+        for wp in waypoints:
+            result = self.primitives['MoveJ'].execute(wp)
+            if not result.success:
+                return result
+        return SkillResult(success=True, execution_phase=ExecutionPhase.EXECUTION, ...)
+
+    def try_execute(self, waypoints: list) -> SkillResult:
+        check = self.check(waypoints)
+        if not check.success:
+            return check
+        return self.execute(waypoints)
 ```
 
 ---
@@ -355,30 +581,26 @@ skill = Inspection(
 ## ⚙️ 配置建议
 
 ### 当前Primitives（已实现/计划）
+- ✅ `MoveJ` - 关节运动
+- ✅ `MoveL` - 直线运动
+- ✅ `Grasp` - 抓取（仿真：AttachClosest；真机：TODO setDO）
+- ✅ `Release` - 释放（仿真：DetachAll；真机：TODO setDO）
+- ⏳ `Screw` - 螺丝刀（未来）
 
-| 原语 | 状态 | 文件 | 说明 |
-|------|------|------|------|
-| `MoveJ` | ✅ 完整 | `primitives/motion.py` | 关节运动；check + execute + try_execute |
-| `MoveL` | ✅ 完整 | `primitives/motion.py` | 直线运动；含全路径 IK 可解性 + 奇点检测 |
-| `Grasp` | ✅ 完整 | `primitives/gripper.py` | 夹爪闭合；`tool.AttachClosest()` 仿真抓取；参数：`force`（N）、`width`（mm） |
-| `Release` | ✅ 完整 | `primitives/gripper.py` | 夹爪打开；`held_item.setParentStatic(station)` 保持世界坐标；参数：`width`（mm） |
-| `Screw` | ⏳ 待实现 | `primitives/screw.py` | 螺丝刀（未来） |
-
-> [2026-03-16 更新] Grasp/Release 已实现。夹爪状态（持有物体）统一存储在 `RobotContext.held_item`，而非模块变量，保证运行时单一真相来源。
+> 由于primitives数量少（<10个），集中管理比动态加载更简洁
 
 ### 推荐文件结构
 ```
 SkiLib/
-├── base.py                    # BasePrimitive, BaseSkill, SkillResult
-├── robotcontext.py            # RobotContext (held_item等运行时状态), PrimitiveRegistry
-├── log.py                     # get_logger()，双 Handler（控制台 + 轮转文件）
+├── base.py                    # BasePrimitive, BaseSkill, CheckResult
+├── robotcontext.py            # RobotContext, PrimitiveRegistry
 ├── utils.py                   # IKSolver等工具
 ├── main.py                    # 示例程序
-├── primitives/                # 平台相关实现（import robodk）
+├── primitives/                # 平台相关实现
 │   ├── __init__.py
 │   ├── motion.py              # MoveJ, MoveL
-│   └── gripper.py             # Grasp, Release
-└── skills/                    # 平台无关逻辑（禁止 import robodk）
+│   └── gripper.py             # Grasp, Release (future)
+└── skills/                    # 平台无关逻辑
     ├── __init__.py
     ├── pick_and_place.py      # PickAndPlace skill
     └── inspection.py          # Inspection skill (future)

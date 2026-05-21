@@ -1,261 +1,301 @@
+from typing import List, Union
+
+import numpy as np
+
 from SkiLib.base import (
-    BasePrimitive, SkillResult, ExecutionPhase, RobotState,
-    ERROR_INVALID_PARAM, ERROR_MISSING_REF_FRAME,
-    ERROR_IK_FAILURE, ERROR_COLLISION, ERROR_TIMEOUT, require_robot_active,
+    BasePrimitive,
+    ERROR_IK_FAILURE,
+    ERROR_INVALID_PARAM,
+    ERROR_TIMEOUT,
+    ExecutionPhase,
+    RobotState,
+    SkillResult,
+    require_robot_active,
 )
-from robodk import robolink
-from robodk import robomath
-from robodk.robolink import Item
-from typing import Optional, Union, List
+from SkiLib.genesis.motion import (
+    IKResult,
+    control_to_qpos,
+    current_qpos,
+    get_tcp_pos,
+    interpolate_positions,
+    solve_ik,
+    validate_joint_target,
+)
+from SkiLib.genesis.types import SceneTarget
 
 
-def _snapshot(robot: robolink.Item) -> RobotState:
-    """Capture current robot state. Returns RobotState with None fields if unreachable."""
-    try:
-        return RobotState(joints=list(robot.Joints()), pose=robot.Pose())
-    except Exception:
-        return RobotState()
+def _target_orientation_data(target: SceneTarget) -> dict:
+    w, x, y, z = (float(v) for v in target.pose.quat)
+    yaw = float((np.degrees(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))) + 180.0) % 360.0 - 180.0)
+    return {
+        "target_quat_wxyz": [w, x, y, z],
+        "target_yaw_deg": round(yaw, 1),
+        "target_tcp_yaw_deg": round(yaw, 1),
+        "target_object_yaw_deg": (
+            round(target.pose.expected_object_yaw_deg, 1)
+            if target.pose.expected_object_yaw_deg is not None
+            else None
+        ),
+    }
+
+
+def _snapshot(runtime) -> RobotState:
+    return runtime.get_current_state()
+
+
+def _ik_failure_result(target_name: str, ik: IKResult) -> SkillResult:
+    return SkillResult(
+        success=False,
+        execution_phase=ExecutionPhase.PLANNING,
+        error_type=ERROR_IK_FAILURE,
+        message=f"Genesis IK failed for target '{target_name}'.",
+        suggestion="Check whether the target is inside the reachable workspace and whether the TCP orientation is feasible.",
+        data={"ik_error": ik.error.tolist()},
+    )
 
 
 class MoveJ(BasePrimitive):
-    def __init__(self, robot_object, RDK_object):
-        self.robot: robolink.Item     = robot_object
-        self.RDK:   robolink.Robolink = RDK_object
+    """Genesis joint-space point-to-point motion primitive."""
 
-    def check(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None ) -> SkillResult: #
-        start = self.robot.Joints()
+    TOOL_NAME = "MoveJ"
+    TOOL_DESCRIPTION = "Move the robot to a named Genesis target using joint motion."
+    TOOL_PARAMETERS = {
+        "target": {
+            "type": "str",
+            "required": True,
+            "description": "Genesis target name to move to with joint motion.",
+            "resolver": "target",
+        },
+    }
 
-        # Resolve target to joint values for MoveJ_Test
-        if isinstance(target, Item):
-            _target = target.Joints()
-        elif isinstance(target, list):
-            _target = target
-        elif isinstance(target, robomath.Mat):
-            if ref_frame is None:
-                return SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.VALIDATION,
-                    error_type=ERROR_MISSING_REF_FRAME,
-                    message="A pose target must be accompanied by a reference frame.",
-                    suggestion="Provide a reference frame when using pose targets.",
-                )
-            _target = list(self.robot.SolveIK(pose=target, reference=ref_frame))
-            if len(_target) == 0:
-                return SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.PLANNING,
-                    error_type=ERROR_IK_FAILURE,
-                    message="Target pose does not have a valid IK solution.",
-                    suggestion="Check if the target pose is within the robot's reachable workspace and verify the pose orientation is achievable.",
-                )
-        else:
-            return SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_INVALID_PARAM,
-                message="Invalid target type. Target must be an Item, a list of joint values, or a Mat pose.",
-                suggestion="Provide a valid target: Item, list of joint values, or Mat pose with reference frame.",
-            )
+    def __init__(self, runtime):
+        super().__init__(runtime)
 
-        # Collision pre-check
-        self.RDK.setCollisionActive(True)
-        test_result = self.robot.MoveJ_Test(start, _target)
-        self.RDK.setCollisionActive(False)
-
-        if test_result == 0:
+    def check(self, target: Union[SceneTarget, List[float]], ref_frame=None) -> SkillResult:
+        if isinstance(target, SceneTarget):
+            ik = solve_ik(self.runtime, target)
+            if not ik.success:
+                return _ik_failure_result(target.name, ik)
             return SkillResult(
                 success=True,
                 execution_phase=ExecutionPhase.PLANNING,
-                message="Path is valid and collision-free.",
+                message=f"MoveJ target '{target.name}' has a valid Genesis IK solution.",
+                data={
+                    "target": target.name,
+                    "qpos": ik.qpos.tolist() if ik.qpos is not None else None,
+                    **_target_orientation_data(target),
+                },
+            )
+        if isinstance(target, list):
+            try:
+                validate_joint_target(self.runtime, target)
+            except ValueError as e:
+                return SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.VALIDATION,
+                    error_type=ERROR_INVALID_PARAM,
+                    message=str(e),
+                )
+            return SkillResult(
+                success=True,
+                execution_phase=ExecutionPhase.PLANNING,
+                message="MoveJ joint target is valid.",
             )
         return SkillResult(
             success=False,
-            execution_phase=ExecutionPhase.PLANNING,
-            error_type=ERROR_COLLISION,
-            message="Path would cause collisions in the station.",
-            data={"collision_count": test_result},
-            suggestion=(
-                "This count includes all collisions in the station, not just those on the path. "
-                "Some may be external or implicitly caused by this move. "
-                "Check the collision map to identify all collision pairs and adjust the path or robot configuration."
-            ),
+            execution_phase=ExecutionPhase.VALIDATION,
+            error_type=ERROR_INVALID_PARAM,
+            message="Invalid MoveJ target. Expected a SceneTarget or joint list.",
         )
-    @require_robot_active
-    def execute(self, target: Union[Item, List[float], robomath.Mat], blocking: bool = True, ref_frame: Optional[robomath.Mat] = None) -> SkillResult:
-        try:
-            if isinstance(target, robomath.Mat):
-                if ref_frame is None:
-                    return SkillResult(
-                        success=False,
-                        execution_phase=ExecutionPhase.VALIDATION,
-                        error_type=ERROR_MISSING_REF_FRAME,
-                        message="A pose target must be accompanied by a reference frame.",
-                        suggestion="Provide a reference frame when using pose targets.",
-                    )
-                prev_frame = self.robot.PoseFrame()
-                self.robot.setPoseFrame(ref_frame)
-                try:
-                    self.robot.MoveJ(target, blocking=blocking)
-                finally:
-                    self.robot.setPoseFrame(prev_frame)
-            else:
-                self.robot.MoveJ(target, blocking=blocking)
 
-            state = _snapshot(self.robot)
+    @require_robot_active
+    def execute(self, target: Union[SceneTarget, List[float]], blocking: bool = True, ref_frame=None) -> SkillResult:
+        return self._submit_to_controller(self._execute_body, target, blocking, ref_frame)
+
+    def _execute_body(self, target: Union[SceneTarget, List[float]], blocking: bool = True, ref_frame=None) -> SkillResult:
+        try:
+            if isinstance(target, SceneTarget):
+                ik = solve_ik(self.runtime, target)
+                if not ik.success or ik.qpos is None:
+                    return _ik_failure_result(target.name, ik)
+                qpos = ik.qpos
+                target_name = target.name
+            elif isinstance(target, list):
+                qpos = validate_joint_target(self.runtime, target)
+                target_name = "joint_target"
+            else:
+                return SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.VALIDATION,
+                    error_type=ERROR_INVALID_PARAM,
+                    message="Invalid MoveJ target. Expected a SceneTarget or joint list.",
+                )
+
+            reached, final_error = control_to_qpos(self.runtime, qpos)
+            if not reached:
+                return SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.EXECUTION,
+                    error_type=ERROR_TIMEOUT,
+                    robot_state=_snapshot(self.runtime),
+                    message=f"MoveJ to '{target_name}' did not converge before timeout.",
+                    suggestion="Increase max_steps/tolerance or verify the target qpos is dynamically reachable.",
+                    data={"final_joint_error": final_error},
+                )
+
+            state = _snapshot(self.runtime)
             return SkillResult(
                 success=True,
                 execution_phase=ExecutionPhase.EXECUTION,
                 robot_state=state,
-                message="MoveJ executed successfully.",
-                data={"joints": state.joints},
+                message=f"MoveJ to '{target_name}' executed successfully.",
+                data={
+                    "joints": state.joints,
+                    "final_joint_error": final_error,
+                    **(_target_orientation_data(target) if isinstance(target, SceneTarget) else {}),
+                },
             )
         except Exception as e:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
                 error_type=ERROR_TIMEOUT,
-                message=f"MoveJ failed during execution: {type(e).__name__}",
-                robot_state=_snapshot(self.robot),
-                suggestion="Check the robot connection and station state.",
+                robot_state=_snapshot(self.runtime),
+                message=f"MoveJ failed during Genesis execution: {type(e).__name__}",
+                suggestion="Check Genesis runtime state and target data.",
             )
 
-    def try_execute(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None, blocking: bool = True) -> SkillResult:
-        check = self.check(target, ref_frame)
-        if not check.success:
-            return check
-        return self.execute(target, blocking, ref_frame) #type: ignore
+    def try_execute(self, target: Union[SceneTarget, List[float]], ref_frame=None, blocking: bool = True) -> SkillResult:
+        if not self._should_skip_check():
+            check = self.check(target, ref_frame)
+            if not check.success:
+                return check
+        return self.execute(target, blocking, ref_frame)
 
 
 class MoveL(BasePrimitive):
-    def __init__(self, robot_object, RDK_object):
-        self.robot: robolink.Item     = robot_object
-        self.RDK:   robolink.Robolink = RDK_object
-        
-    def check(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None) -> SkillResult:
-        # Validate target type and ref_frame requirement
-        if isinstance(target, robomath.Mat):
-            if ref_frame is None:
-                return SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.VALIDATION,
-                    error_type=ERROR_MISSING_REF_FRAME,
-                    message="A pose target must be accompanied by a reference frame.",
-                    suggestion="Provide a reference frame when using pose targets.",
-                )
-        elif not isinstance(target, (Item, list)):
+    """Genesis Cartesian linear motion primitive."""
+
+    TOOL_NAME = "MoveL"
+    TOOL_DESCRIPTION = "Move the TCP to a named Genesis target using linear Cartesian motion."
+    TOOL_PARAMETERS = {
+        "target": {
+            "type": "str",
+            "required": True,
+            "description": "Genesis target name to move to with Cartesian linear motion.",
+            "resolver": "target",
+        },
+    }
+
+    def __init__(self, runtime):
+        super().__init__(runtime)
+
+    def _waypoint_qpos(self, target: SceneTarget, steps: int = 20) -> tuple[list, IKResult | None]:
+        start = get_tcp_pos(self.runtime)
+        end = target.pose.pos
+        qpos_seed = current_qpos(self.runtime)
+        qposes = []
+
+        for pos in interpolate_positions(start, end, steps)[1:]:
+            waypoint = type(target.pose)(
+                name=f"{target.name}_waypoint",
+                pos=tuple(float(v) for v in pos),
+                quat=target.pose.quat,
+                kind=target.pose.kind,
+                yaw_deg=target.pose.yaw_deg,
+                tcp_yaw_deg=target.pose.tcp_yaw_deg,
+                expected_object_yaw_deg=target.pose.expected_object_yaw_deg,
+            )
+            ik = solve_ik(self.runtime, waypoint, init_qpos=qpos_seed)
+            if not ik.success or ik.qpos is None:
+                return qposes, ik
+            qposes.append(ik.qpos)
+            qpos_seed = ik.qpos
+        return qposes, None
+
+    def check(self, target: SceneTarget, ref_frame=None) -> SkillResult:
+        if not isinstance(target, SceneTarget):
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
                 error_type=ERROR_INVALID_PARAM,
-                message="Invalid target type. Target must be an Item, a list of joint values, or a Mat pose.",
-                suggestion="Provide a valid target: Item, list of joint values, or Mat pose with reference frame.",
+                message="Invalid MoveL target. Expected a SceneTarget.",
             )
-
-        start = self.robot.Joints()
-
-        # Resolve target to a Mat pose for MoveL_Test (which only accepts Mat as pose arg).
-        # MoveL_Test return codes (never raises):
-        #   0  → path valid and collision-free
-        #  -2  → target pose unreachable (IK failure at endpoint)
-        #  -1  → target reachable but linear path infeasible (singularity or workspace boundary
-        #         violated along the Cartesian trajectory)
-        #  > 0 → number of collision pairs detected
-        if isinstance(target, robomath.Mat):
-            assert ref_frame is not None  # guaranteed by the validation block above
-            # Express pose in robot base frame so MoveL_Test uses a consistent reference.
-            target_pose: robomath.Mat = ref_frame * target
-        elif isinstance(target, list):
-            # Joint values → FK gives pose in robot base frame.
-            target_pose = self.robot.SolveFK(target)
-        else:
-            # Item: get its pose in the world frame then express it relative to robot base.
-            target_pose = self.robot.PoseFrame().inv() * target.Pose()
-
-        self.RDK.setCollisionActive(True)
-        test_result = self.robot.MoveL_Test(start, target_pose)
-        self.RDK.setCollisionActive(False)
-
-        if test_result == 0:
-            return SkillResult(
-                success=True,
-                execution_phase=ExecutionPhase.PLANNING,
-                message="Linear path is valid and collision-free.",
-            )
-        if test_result == -2:
-            return SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.PLANNING,
-                error_type=ERROR_IK_FAILURE,
-                message="Target pose is outside the robot's reachable workspace.",
-                suggestion=(
-                    "Verify the target coordinates and orientation. "
-                    "Consider adjusting the approach direction or using a different configuration."
-                ),
-            )
-        if test_result == -1:
-            return SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.PLANNING,
-                error_type=ERROR_IK_FAILURE,
-                message="Target is reachable but the linear path passes through a singularity or workspace boundary.",
-                suggestion=(
-                    "The robot cannot maintain a straight-line Cartesian path to the target. "
-                    "Use MoveJ to avoid the singularity, or approach from a different direction."
-                ),
-            )
+        qposes, failed = self._waypoint_qpos(target)
+        if failed is not None:
+            return _ik_failure_result(target.name, failed)
         return SkillResult(
-            success=False,
+            success=True,
             execution_phase=ExecutionPhase.PLANNING,
-            error_type=ERROR_COLLISION,
-            message="Linear path would cause collisions in the station.",
-            data={"collision_count": test_result},
-            suggestion=(
-                "This count includes all collisions in the station, not just those on the linear path. "
-                "Some may be external or implicitly caused by this move. "
-                "Check the collision map to identify all collision pairs and adjust the approach direction."
-            ),
+            message=f"MoveL target '{target.name}' has valid waypoint IK solutions.",
+            data={"target": target.name, "waypoints": len(qposes), **_target_orientation_data(target)},
         )
-    @require_robot_active(bypass_halt=False)
-    def execute(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None, blocking: bool = True) -> SkillResult:
+
+    @require_robot_active
+    def execute(self, target: SceneTarget, ref_frame=None, blocking: bool = True) -> SkillResult:
+        return self._submit_to_controller(self._execute_body, target, ref_frame, blocking)
+
+    def _execute_body(self, target: SceneTarget, ref_frame=None, blocking: bool = True) -> SkillResult:
+        if not isinstance(target, SceneTarget):
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type=ERROR_INVALID_PARAM,
+                message="Invalid MoveL target. Expected a SceneTarget.",
+            )
         try:
-            if isinstance(target, robomath.Mat):
-                if ref_frame is None:
+            qposes, failed = self._waypoint_qpos(target)
+            if failed is not None:
+                return _ik_failure_result(target.name, failed)
+
+            max_error = 0.0
+            for idx, qpos in enumerate(qposes):
+                is_final_waypoint = idx == len(qposes) - 1
+                reached, final_error = control_to_qpos(
+                    self.runtime,
+                    qpos,
+                    max_steps=260 if is_final_waypoint else 180,
+                    tolerance=0.012 if is_final_waypoint else 0.03,
+                    settle_tolerance=0.04 if is_final_waypoint else 0.08,
+                )
+                max_error = max(max_error, final_error)
+                if not reached:
                     return SkillResult(
                         success=False,
-                        execution_phase=ExecutionPhase.VALIDATION,
-                        error_type=ERROR_MISSING_REF_FRAME,
-                        message="A pose target must be accompanied by a reference frame.",
-                        suggestion="Provide a reference frame when using pose targets.",
+                        execution_phase=ExecutionPhase.EXECUTION,
+                        error_type=ERROR_TIMEOUT,
+                        robot_state=_snapshot(self.runtime),
+                        message=f"MoveL to '{target.name}' did not converge at a waypoint.",
+                        suggestion="Increase waypoint tracking steps or reduce Cartesian step size.",
+                        data={"final_joint_error": final_error},
                     )
-                prev_frame = self.robot.PoseFrame()
-                self.robot.setPoseFrame(ref_frame)
-                try:
-                    self.robot.MoveL(target, blocking=blocking)
-                finally:
-                    self.robot.setPoseFrame(prev_frame)
-            else:
-                self.robot.MoveL(target, blocking=blocking)
 
-            state = _snapshot(self.robot)
+            state = _snapshot(self.runtime)
             return SkillResult(
                 success=True,
                 execution_phase=ExecutionPhase.EXECUTION,
                 robot_state=state,
-                message="MoveL executed successfully.",
-                data={"pose": state.pose},
+                message=f"MoveL to '{target.name}' executed successfully.",
+                data={
+                    "joints": state.joints,
+                    "max_joint_error": max_error,
+                    "waypoints": len(qposes),
+                    **_target_orientation_data(target),
+                },
             )
         except Exception as e:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
                 error_type=ERROR_TIMEOUT,
-                message=f"MoveL failed during execution: {type(e).__name__}",
-                robot_state=_snapshot(self.robot),
-                suggestion="Check the robot connection and station state.",
+                robot_state=_snapshot(self.runtime),
+                message=f"MoveL failed during Genesis execution: {type(e).__name__}",
+                suggestion="Check Genesis runtime state and target data.",
             )
 
-    def try_execute(self, target: Union[Item, List[float], robomath.Mat], ref_frame: Optional[robomath.Mat] = None, blocking: bool = True) -> SkillResult:
-        check = self.check(target, ref_frame)
-        if not check.success:
-            return check
-        return self.execute(target, ref_frame, blocking) #type: ignore
+    def try_execute(self, target: SceneTarget, ref_frame=None, blocking: bool = True) -> SkillResult:
+        if not self._should_skip_check():
+            check = self.check(target, ref_frame)
+            if not check.success:
+                return check
+        return self.execute(target, ref_frame, blocking)

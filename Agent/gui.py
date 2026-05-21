@@ -9,6 +9,26 @@ Usage:
     from Agent.gui import launch_gui
     launch_gui(graph)
 """
+# On macOS, pyglet (used by Genesis viewer) requires an NSApplication context that
+# only exists when running via python.app.  Re-exec directly with the python.app
+# binary (not the pythonw shell wrapper, which requires an extra fork).
+import sys as _sys
+import os as _os
+# if _sys.platform == "darwin" and "python.app" not in _sys.executable:
+#     from pathlib import Path as _Path
+#     # python.app lives two levels up from the conda env's bin/python
+#     _python_app = _Path(_sys.executable).parent.parent / "python.app/Contents/MacOS/python"
+#     if _python_app.exists():
+#         _os.environ.setdefault("PYTHONEXECUTABLE", _sys.executable)
+#         _os.execv(str(_python_app), [str(_python_app)] + _sys.argv)
+
+# If window cannot hold on macos, decomment this to force cocoa
+# TODO: macOS下打不开viewer，据查询可能是因为pyglet在pip上的版本无法正确处理OpenGL3+，后面先去linux环境试试
+import platform, os
+if platform.system() == "Darwin":
+    # Force Cocoa app activation so pyglet window survives
+    os.environ.setdefault("PYOBJUS_MACOS_APPKIT_THREAD_CHECK", "0")
+    
 import logging
 import os
 import queue as _queue_module
@@ -20,16 +40,25 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
+from SkiLib.genesis.controller import GenesisController
 from SkiLib.log import get_logger, attach_queue_handler
-from SkiLib.registry import SkillRegistry
-from SkiLib.robotcontext import RobotContext
-from Agent.graph import build_graph, make_initial_state
+from SkiLib.sim_env import setup_robot_env
+# ── Version switch ─────────────────────────────────────────────────────────
+# Set USE_V2 = True to run the skill.md-based planner/executor (V2 graph).
+# Set USE_V2 = False to run the original Python BaseSkill graph (V1).
+USE_V2: bool = True
+
+if USE_V2:
+    from Agent.graph_v2 import build_graph_v2 as build_graph
+else:
+    from Agent.graph import build_graph
+from Agent.graph import make_initial_state   # shared; same in both versions
 from Agent.nodes.supervisor import reset_supervisor_cache
 
 
 def _setup_env() -> None:
     """Load .env and auto-enable LangSmith tracing if API key is present."""
-    load_dotenv()
+    load_dotenv(override=True)
     if os.getenv("LANGSMITH_API_KEY") and not os.getenv("LANGSMITH_TRACING"):
         os.environ["LANGSMITH_TRACING"] = "true"
     if os.getenv("LANGSMITH_TRACING", "false").lower() == "true":
@@ -121,7 +150,7 @@ def _check_for_interrupt(graph, config: dict, session: dict, log_lines: list[str
 def launch_gui(
     graph=None,
     log_queue: _queue_module.Queue | None = None,
-    debug_skip_check: bool = True,
+    debug_skip_check: bool | None = None,
     **kwargs,
 ):
     """Build and launch the Gradio demo.
@@ -134,15 +163,20 @@ def launch_gui(
     """
     _setup_env()
 
+    if debug_skip_check is None:
+        debug_skip_check = os.getenv("ROBOSKI_SKIP_CHECK", "true").lower() in ("1", "true", "yes")
+
     if log_queue is None:
         log_queue = _queue_module.Queue()
         attach_queue_handler(log_queue)
 
-    # Initialize RoboDK context once before building the graph
-    context = RobotContext()
-    context.debug_skip_check = debug_skip_check
-    SkillRegistry.instance()
-    logger.info("[gui] RobotContext ready. debug_skip_check=%s", debug_skip_check)
+    ctx = setup_robot_env(debug_skip_check=debug_skip_check)
+
+    # Attach a GenesisController so all scene.step() calls are serialised onto
+    # one thread.  On macOS the pyrender viewer cannot run in a background thread,
+    # so we run Gradio non-blocking and keep the main thread for Genesis.
+    genesis_ctrl = GenesisController(ctx.runtime)
+    ctx.runtime.controller = genesis_ctrl
 
     if graph is None:
         graph = build_graph()
@@ -236,19 +270,38 @@ def launch_gui(
                 show_label=False,
                 scale=4,
             )
-            start_btn = gr.Button("Start", variant="primary", scale=1)
+            start_btn  = gr.Button("Start",             variant="primary",    scale=1)
+            reset_btn  = gr.Button("Reset Environment", variant="secondary",  scale=1)
+
+        reset_status = gr.Textbox(label="Reset Status", interactive=False, visible=False)
 
         all_outputs = [log_box, session_state] + buttons
 
         start_btn.click(fn=start_flow,   inputs=[prompt_box, session_state], outputs=all_outputs)
         prompt_box.submit(fn=start_flow, inputs=[prompt_box, session_state], outputs=all_outputs)
 
+        def _reset_env():
+            from SkiLib.sim_env import reset_station
+            reset_station()
+            return gr.update(value="Environment reset to home state.", visible=True)
+
+        reset_btn.click(fn=_reset_env, inputs=[], outputs=[reset_status])
+
         for btn in buttons:
             btn.click(fn=handle_choice, inputs=[btn, feedback_box, session_state], outputs=all_outputs)
 
+    # prevent_thread_lock=True lets Gradio start in background threads so the
+    # main thread is free to run the Genesis controller loop below.
+    kwargs.setdefault("prevent_thread_lock", True)
     demo.launch(**kwargs)
+
+    try:
+        genesis_ctrl.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        genesis_ctrl.stop()
 
 
 if __name__ == "__main__":
-    
     launch_gui()

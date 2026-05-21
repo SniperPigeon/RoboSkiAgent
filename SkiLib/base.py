@@ -3,7 +3,6 @@ from abc import abstractmethod, ABC
 from dataclasses import dataclass, asdict
 from enum import Enum
 from typing import Callable, List, Dict, Any, Literal, Optional
-from robodk import robolink, robomath
 
 
 # ================ ExecutionPhase ================
@@ -37,8 +36,8 @@ class RobotState:
     Attributes:
         joints:        Current joint angles in degrees.
         pose:          Current TCP pose. Callers may store any convenient format
-                       (e.g. robomath.Mat, List[float]) — base.py stays platform-agnostic
-                       by using Any rather than importing platform-specific types.
+                       (e.g. nested list, ndarray-like object, simulator-native pose).
+                       base.py stays platform-agnostic by using Any.
         gripper_state: Gripper state — "OPEN" / "CLOSED" / "UNKNOWN".
     """
     joints:        Optional[List[float]] = None
@@ -108,13 +107,13 @@ class SkillResult:
     error_type:      Optional[str]        = None
     suggestion:      Optional[str]        = None
     data:            Optional[dict]       = None
-    needs_hilp:      bool                 = True
-    # needs_hilp semantics:
-    #   True  (default) — Executor has given up; Context Flush should trigger HILP.
+    needs_hitl:      bool                 = True
+    # needs_hitl semantics:
+    #   True  (default) — Executor has given up; Context Flush should trigger HITL.
     #   False           — Executor's internal ReAct loop is still recovering; this state
     #                     must NOT be written to last_result when exiting the Executor node.
-    #                     If Context Flush ever sees success=False + needs_hilp=False it
-    #                     treats it conservatively as needs_hilp=True (safety net).
+    #                     If Context Flush ever sees success=False + needs_hitl=False it
+    #                     treats it conservatively as needs_hitl=True (safety net).
 
     def __post_init__(self):
         # Programming-time invariant: a failed result must carry error_type so the
@@ -138,14 +137,18 @@ class SkillResult:
             "message": self.message,
         }
         if self.robot_state is not None:
+            pose = self.robot_state.pose
+            # Simulator-native matrix/array objects are often not JSON-serializable.
+            if hasattr(pose, "tolist"):
+                pose = pose.tolist()
             payload["robot_state"] = {
                 "joints":        self.robot_state.joints,
-                "pose":          self.robot_state.pose,
+                "pose":          pose,
                 "gripper_state": self.robot_state.gripper_state,
             }
         if not self.success:
             payload["error_type"] = self.error_type
-            payload["needs_hilp"] = self.needs_hilp
+            payload["needs_hitl"] = self.needs_hitl
             if self.suggestion:
                 payload["suggestion"] = self.suggestion
         if self.data:
@@ -239,19 +242,22 @@ class BasePrimitive(ABC):
     """
     Base class for all robot primitives.
 
-    Primitives are platform-specific low-level implementations (e.g. RoboDK)
+    Primitives are platform-specific low-level implementations (e.g. Genesis)
     that are automatically instantiated and managed by PrimitiveRegistry.
 
     Implementation requirements:
-        1. Import platform-specific libraries (robodk, etc.) inside the module.
+        1. Keep platform-specific libraries out of base.py.
         2. Implement check() / execute() / try_execute(), all returning SkillResult.
         3. execute() must catch all exceptions internally — never let them propagate.
         4. Place the module inside the primitives/ directory for auto-discovery.
     """
 
-    def __init__(self, robot_object, RDK_object):
-        self.robot: robolink.Item     = robot_object
-        self.RDK:   robolink.Robolink = RDK_object
+    TOOL_NAME: Optional[str] = None
+    TOOL_DESCRIPTION: str = ""
+    TOOL_PARAMETERS: Dict[str, Dict[str, Any]] = {}
+
+    def __init__(self, runtime):
+        self.runtime = runtime
 
     @abstractmethod
     def check(self, *args, **kwargs) -> SkillResult:
@@ -263,6 +269,24 @@ class BasePrimitive(ABC):
         """Execute the primitive action. Must catch all exceptions internally."""
         pass
 
+    def _should_skip_check(self) -> bool:
+        """Return True when RobotContext.debug_skip_check is set (simulation / test mode)."""
+        from SkiLib.robotcontext import RobotContext  # noqa: PLC0415
+        ctx = RobotContext.instance()
+        return ctx is not None and bool(ctx.debug_skip_check)
+
+    def _submit_to_controller(self, fn: Callable, /, *args, **kwargs) -> 'SkillResult':
+        """Run *fn* on the GenesisController thread if one is attached, else inline.
+
+        Ensures all scene.step() calls are serialised onto the thread that owns
+        the OpenGL / Taichi context.  When no controller is set (CLI / test mode)
+        *fn* is called directly on the current thread.
+        """
+        ctrl = getattr(self.runtime, "controller", None)
+        if ctrl is not None and not ctrl.is_genesis_thread():
+            return ctrl.submit(fn, *args, **kwargs)
+        return fn(*args, **kwargs)
+
     @abstractmethod
     def try_execute(self, *args, **kwargs) -> SkillResult:
         """Run check(), then execute() if the check passed. Returns a single SkillResult."""
@@ -270,6 +294,7 @@ class BasePrimitive(ABC):
 
 
 # ================ BaseSkill ================
+
 
 class BaseSkill(ABC):
     """
@@ -292,6 +317,13 @@ class BaseSkill(ABC):
     """
 
     REQUIRED_PRIMITIVES: List[str] = []
+    SKILL_DESCRIPTION:   str       = ""      # Human/LLM-readable description for tool schemas
+    SKILL_CATEGORY:      str       = "skill" # Category tag for list_skills(category=) filtering
+    # Methods exposed to the LLM via as_tools().
+    # "execute" is intentionally excluded: the LLM should always go through try_execute
+    # (which validates before moving) or use check() for non-destructive probing.
+    # Subclasses may override to add "execute" only when there is a deliberate reason.
+    TOOL_METHODS:        tuple     = ("check", "try_execute")
 
     def __init__(self, primitives: Dict[str, 'BasePrimitive']):
         """
@@ -319,10 +351,76 @@ class BaseSkill(ABC):
         """Execute the skill. Must catch all exceptions internally."""
         pass
 
+    def _should_skip_check(self) -> bool:
+        """
+        Return True when RobotContext.debug_skip_check is set.
+
+        Intended for simulation / unit-test environments: subclasses call this at
+        the top of their try_execute() to decide whether to bypass check().
+
+        Pattern for subclass try_execute():
+            if self._should_skip_check():
+                logger.debug("Skipping pre-flight check (debug_skip_check=True)")
+                return self.execute(...)
+            result = self.check(...)
+            if not result.success:
+                return result
+            return self.execute(...)
+        """
+        from SkiLib.robotcontext import RobotContext  # noqa: PLC0415 (lazy import avoids circular dep)
+        ctx = RobotContext.instance()
+        return ctx is not None and bool(ctx.debug_skip_check)
+
     @abstractmethod
     def try_execute(self, *args, **kwargs) -> SkillResult:
-        """Run check(), then execute() if the check passed. Returns a single SkillResult."""
+        """Run check(), then execute() if the check passed. Returns a single SkillResult.
+
+        Subclass implementations must keep concrete type signatures (not *args/**kwargs)
+        so that as_tools() can generate a correct LangChain JSON schema.
+        Call self._should_skip_check() at the top to honour debug_skip_check.
+        """
         pass
+
+    def as_tools(self) -> List:
+        """
+        Generate LangChain StructuredTool wrappers for the methods listed in TOOL_METHODS.
+
+        Each method becomes one tool named "<SkillClassName>.<method_name>".
+        The tool description is taken from the method's __doc__ string.
+        Results are passed through SkillResult.to_llm_message() so the LLM
+        never receives raw Python objects.
+
+        By default only "check" and "try_execute" are exposed (see TOOL_METHODS).
+        "execute" is excluded because it bypasses validation; the LLM should always
+        use try_execute for safe execution or check for non-destructive probing.
+
+        Returns:
+            List of StructuredTool objects, one per entry in TOOL_METHODS.
+            Suitable for llm.bind_tools().
+
+        Note:
+            LangChain is imported lazily to avoid making it a hard dependency
+            of base.py for consumers that don't use the LLM layer.
+        """
+        # Lazy imports: keep base.py free of hard LangChain dependency
+        from langchain_core.tools import StructuredTool  # noqa: PLC0415
+
+        skill_name = type(self).__name__
+        tools = []
+        for method_name in self.TOOL_METHODS:
+            method = getattr(self, method_name)  # bound method; self already captured
+
+            @functools.wraps(method)
+            def _wrapper(*args, _m=method, **kwargs):
+                result = _m(*args, **kwargs)
+                return result.to_llm_message() if isinstance(result, SkillResult) else result
+
+            tools.append(StructuredTool.from_function(
+                func=_wrapper,
+                name=f"{skill_name}_{method_name}",
+                description=method.__doc__ or f"{skill_name} {method_name}",
+            ))
+        return tools
 
 
 # ================ @require_robot_active decorator ================

@@ -1,609 +1,416 @@
 """
-Pick and Place Skill
+Pick and Place Skill - Platform-agnostic implementation
 
-Executes a safe pick-and-place motion sequence:
-  transit → pick_approach → [MoveL plunge] → pick → GRASP → [MoveL retract] →
-  pick_approach → transit → place_approach → [MoveL plunge] → place → RELEASE →
-  [MoveL retract] → place_approach
+Architecture:
+- NO RoboDK imports (platform-agnostic)
+- All symbol IDs (str) resolved to RoboDK Items via RobotContext
+- Dependencies injected via primitives registry
+- Pure composition of primitives
+- Returns SkillResult throughout
 
-Design principles:
-  - All parameters are plain strings (RoboDK target names) for LLM Tool compatibility.
-  - Approach targets are resolved from explicit names or auto-searched by naming convention.
-  - check() validates every motion segment before a single joint moves.
-  - Grasp / Release primitives are optional; execution continues with a warning if absent.
+Execution sequence:
+    1. initial_motion to pick_approach  (initial_motion, default MoveL)
+    2. MoveL  to pick_target            (linear precise approach)
+    3. Grasp  item                      (close gripper)
+    4. MoveL  to pick_approach          (linear depart, same as approach)
+    5. transit_motion to place_approach (transit_motion, default MoveL)
+    6. MoveL  to place_target           (linear precise approach)
+    7. Release item                     (open gripper)
+    8. MoveL  to place_approach         (linear depart)
 """
 
-from __future__ import annotations
-
-from typing import Optional, Tuple
-
-from robodk import robolink
-
-from SkiLib.base import (
-    BaseSkill,
-    ExecutionPhase,
-    RobotState,
-    SkillResult,
-    ERROR_INVALID_PARAM,
-    ERROR_IK_FAILURE,
-    ERROR_COLLISION,
-    require_robot_active,
-)
+from typing import Dict, Optional, Tuple
+from SkiLib.base import BaseSkill, SkillResult, ExecutionPhase
+from SkiLib.robotcontext import RobotContext
 from SkiLib.log import get_logger
 
 logger = get_logger(__name__)
 
-# Approach target naming conventions searched in order when no explicit name is given.
-_APPROACH_SUFFIXES = ["_App", "_Approach", "_approach"]
-_APPROACH_PREFIXES = ["App_"]
+_VALID_TRANSIT_MOTIONS = ("MoveJ", "MoveL")
 
-# Sentinel used internally so helpers can signal "no error".
-_OK: Optional[SkillResult] = None
+
+_CTX_NOT_INITIALIZED = SkillResult(
+    success=False,
+    execution_phase=ExecutionPhase.VALIDATION,
+    error_type="CONTEXT_NOT_INITIALIZED",
+    message="RobotContext has not been initialized. Call RobotContext.initialize() before using skills.",
+)
+
+
+def _resolve(name: str, ctx: RobotContext) -> Tuple[Optional[object], Optional[SkillResult]]:
+    """Resolve a symbol name to a Genesis scene handle. Returns (item, None) on success or (None, error) on failure."""
+    try:
+        obj = ctx.resolve_item(name)
+    except KeyError:
+        return None, SkillResult(
+            success=False,
+            execution_phase=ExecutionPhase.VALIDATION,
+            error_type="ITEM_NOT_FOUND",
+            message=f"Item '{name}' not found in the Genesis scene.",
+            suggestion="Use list_targets() or list_objects() to discover valid symbols.",
+        )
+    return obj, None
 
 
 class PickAndPlace(BaseSkill):
     """
-    Pick an object from pick_target and place it at place_target using a
-    safe approach-retract motion sequence.
+    High-level pick and place skill.
 
-    Required primitives : MoveJ, MoveL
-    Optional primitives : Grasp, Release
+    All position/item arguments are Genesis symbol names (strings).
+    Symbols are resolved internally via RobotContext.
+
+    Sequence (execute):
+        1. initial_motion → Home_position  (initial_motion: MoveJ or MoveL, default MoveL)
+        2. MoveL          → pick_approach  (linear approach to grasp point)
+        3. MoveL          → pick_target    (linear precise approach to grasp point)
+        4. Grasp            item
+        5. MoveL          → pick_approach  (linear depart with workpiece)
+        6. transit_motion → place_approach (transit_motion: MoveJ or MoveL, default MoveL)
+        7. MoveL          → place_target   (linear precise approach to place point)
+        8. Release          item
+        9. MoveL          → place_approach (linear depart, empty gripper)
+        10 MoveL          → Home_position  (return to home)
     """
 
-    SKILL_DESCRIPTION = (
-        "Pick an object from pick_target and place it at place_target. "
-        "Uses approach targets for safe linear entry and exit. "
-        "Approach targets are resolved from explicit names or auto-searched by naming convention."
-    )
-    REQUIRED_PRIMITIVES = ["MoveJ", "MoveL"]
+    SKILL_DESCRIPTION   = "Pick an object from pick_target and place it at place_target."
+    SKILL_CATEGORY      = "manipulation"
+    REQUIRED_PRIMITIVES = ['MoveJ', 'MoveL', 'Grasp', 'Release']
+
+    def __init__(self, primitives: Dict):
+        super().__init__(primitives)
 
     # ------------------------------------------------------------------
-    # Public interface  (check / execute / try_execute — identical sigs)
+    # check
     # ------------------------------------------------------------------
 
     def check(
         self,
+        item: str,
+        home_position: str,
+        pick_approach: str,
         pick_target: str,
+        place_approach: str,
         place_target: str,
-        pick_approach: str = "",
-        place_approach: str = "",
-        motion_type: str = "MoveJ",
-        grasp_force: float = 0.0,
-        grasp_width: float = 0.0,
-        release_width: float = 0.0,
-        skip_feasibility_check: bool = False,
+        transit_motion: str = "MoveL",
+        initial_motion: str = "MoveL",
     ) -> SkillResult:
         """
-        Validate the full pick-and-place motion plan without moving the robot.
-
-        Checks all four motion segments in sequence:
-          1. current → pick_approach      (motion_type)
-          2. pick_approach → pick_target  (MoveL)
-          3. pick_target → place_approach (motion_type)
-          4. place_approach → place_target (MoveL)
-
-        Also runs Grasp.check() pre-conditions if the Grasp primitive is available.
-        Release.check() is intentionally skipped at planning time because held_item
-        is always None before execution begins.
+        Pre-flight feasibility check.
 
         Args:
-            pick_target:          RoboDK target name for the grasp point.
-            place_target:         RoboDK target name for the release point.
-            pick_approach:        Approach target name for pick side; auto-searched if empty.
-            place_approach:       Approach target name for place side; auto-searched if empty.
-            motion_type:          Transit motion type — "MoveJ" (default) or "MoveL".
-            grasp_force:          Gripping force in N passed to Grasp (0 = gripper default).
-            grasp_width:          Jaw width at grasp point in mm (0 = gripper default).
-            release_width:        Jaw opening width in mm after release (0 = fully open).
-            skip_feasibility_check: DEBUG ONLY — skip all segment feasibility checks (IK,
-                                  singularity, and collision) and only verify that all named
-                                  targets exist in the RoboDK station.
-                                  Do NOT use in production; path feasibility is not guaranteed.
+            item:            RoboDK name of the workpiece to grasp/release.
+            home_position:   Target name for the initial and final home position.
+            pick_approach:   Target name for the approach/depart point near pick.
+            pick_target:     Target name for the linear-move precise grasp point.
+            place_approach:  Target name for the transit destination / depart point near place.
+            place_target:    Target name for the linear-move precise place point.
+            transit_motion:  Motion type for the pick_approach→place_approach segment.
+                             Must be "MoveL" (default) or "MoveJ".
+            initial_motion:  Motion type for the initial move to pick_approach.
+                             Must be "MoveL" (default) or "MoveJ".
 
         Returns:
-            SkillResult with success=True if all segments are feasible.
+            SkillResult — success=False with first failing check on failure.
+
+        Note:
+            All motion checks use the robot's current position as start. Full sequential
+            path simulation is not possible at planning time; this check covers reachability
+            and item validity only.
         """
-        err = self._validate_motion_type(motion_type)
-        if err:
-            return err
-
-        ctx = self._get_context()
-        if isinstance(ctx, SkillResult):
-            return ctx
-
-        pick_item, err = self._resolve_item(ctx, pick_target, "pick_target")
-        if err:
-            return err
-        place_item, err = self._resolve_item(ctx, place_target, "place_target")
-        if err:
-            return err
-        pick_app_item, err = self._resolve_approach(ctx, pick_item, pick_approach, "pick_approach")
-        if err:
-            return err
-        place_app_item, err = self._resolve_approach(ctx, place_item, place_approach, "place_approach")
-        if err:
-            return err
-
-        # Validate Grasp parameters and tool availability before any motion check.
-        # Release.check() is skipped here: it verifies held_item is not None, which is
-        # always False at planning time, so calling it would produce a false-negative.
-        if "Grasp" in self.primitives:
-            grasp_check = self.primitives["Grasp"].check(grasp_force, grasp_width)
-            if not grasp_check.success:
-                grasp_check.message = f"[Grasp pre-check] {grasp_check.message}"
-                return grasp_check
-
-        if skip_feasibility_check:
-            logger.warning(
-                "check() — collision/IK checks BYPASSED (skip_feasibility_check=True). "
-                "All four targets resolved OK but path feasibility is NOT guaranteed. "
-                "pick='%s', place='%s'",
-                pick_target, place_target,
-            )
+        # 1. Validate motion type parameters
+        if initial_motion not in _VALID_TRANSIT_MOTIONS:
             return SkillResult(
-                success=True,
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type="INVALID_PARAM",
+                message=f"initial_motion must be 'MoveJ' or 'MoveL', got '{initial_motion}'.",
+            )
+        if transit_motion not in _VALID_TRANSIT_MOTIONS:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type="INVALID_PARAM",
+                message=f"transit_motion must be 'MoveJ' or 'MoveL', got '{transit_motion}'.",
+            )
+
+        # 2. Resolve all symbols
+        ctx = RobotContext.instance()
+        if ctx is None:
+            return _CTX_NOT_INITIALIZED
+        item_obj, err = _resolve(item, ctx)
+        if err:
+            return err
+        home_position_obj, err = _resolve(home_position, ctx)
+        if err:
+            return err
+        pick_approach_obj, err = _resolve(pick_approach, ctx)
+        if err:
+            return err
+        pick_target_obj, err = _resolve(pick_target, ctx)
+        if err:
+            return err
+        place_approach_obj, err = _resolve(place_approach, ctx)
+        if err:
+            return err
+        place_target_obj, err = _resolve(place_target, ctx)
+        if err:
+            return err
+
+        # 3. Check pick_approach reachable via initial_motion
+        result = self.primitives[initial_motion].check(target=home_position_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
                 execution_phase=ExecutionPhase.PLANNING,
-                message=(
-                    f"[DEBUG] Targets resolved; collision/IK checks skipped. "
-                    f"pick '{pick_target}' → place '{place_target}'."
-                ),
+                error_type=result.error_type,
+                message=f"home_position '{home_position}' not reachable via {initial_motion}: {result.message}",
+                suggestion=result.suggestion,
+            )
+        
+        result = self.primitives['MoveL'].check(target=pick_approach_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"pick_approach '{pick_approach}' not reachable via {initial_motion}: {result.message}",
+                suggestion=result.suggestion,
             )
 
-        robot = ctx.robot
-        RDK   = ctx.RDK
-        RDK.setCollisionActive(True)
-        try:
-            j_current    = list(robot.Joints())
-            j_pick_app   = list(pick_app_item.Joints())
-            j_pick_tgt   = list(pick_item.Joints())
-            j_place_app  = list(place_app_item.Joints())
-
-            # Segment 1: current → pick_approach
-            err = self._check_segment(
-                robot, j_current, pick_app_item, motion_type,
-                f"current → pick_approach '{pick_app_item.Name()}'",
+        # 4. Check pick_target reachable via MoveL
+        result = self.primitives['MoveL'].check(target=pick_target_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"pick_target '{pick_target}' not reachable via MoveL: {result.message}",
+                suggestion=result.suggestion,
             )
-            if err:
-                return err
 
-            # Segment 2: pick_approach → pick_target  (always MoveL)
-            err = self._check_segment(
-                robot, j_pick_app, pick_item, "MoveL",
-                f"pick_approach '{pick_app_item.Name()}' → pick_target '{pick_target}'",
+        # 5. Check Grasp preconditions
+        result = self.primitives['Grasp'].check(expected_item=item_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"Grasp check failed for item '{item}': {result.message}",
+                suggestion=result.suggestion,
             )
-            if err:
-                return err
 
-            # Segment 3: pick_target → place_approach
-            err = self._check_segment(
-                robot, j_pick_tgt, place_app_item, motion_type,
-                f"pick_target '{pick_target}' → place_approach '{place_app_item.Name()}'",
+        # 6. Check place_approach reachable via transit_motion
+        result = self.primitives[transit_motion].check(target=place_approach_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"place_approach '{place_approach}' not reachable via {transit_motion}: {result.message}",
+                suggestion=result.suggestion,
             )
-            if err:
-                return err
 
-            # Segment 4: place_approach → place_target  (always MoveL)
-            err = self._check_segment(
-                robot, j_place_app, place_item, "MoveL",
-                f"place_approach '{place_app_item.Name()}' → place_target '{place_target}'",
+        # 7. Check place_target reachable via MoveL
+        result = self.primitives['MoveL'].check(target=place_target_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"place_target '{place_target}' not reachable via MoveL: {result.message}",
+                suggestion=result.suggestion,
             )
-            if err:
-                return err
-
-        finally:
-            RDK.setCollisionActive(False)
-
-        logger.info(
-            "check() passed for pick '%s' → place '%s' (motion_type=%s)",
-            pick_target, place_target, motion_type,
-        )
+        # 8. Check home_position preconditions
+        result = self.primitives['MoveL'].check(target=home_position_obj)
+        if not result.success:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=result.error_type,
+                message=f"Back to home_position '{home_position}' not reachable via MoveL: {result.message}",
+                suggestion=result.suggestion,
+            )
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
-            message=(
-                f"All motion segments validated: pick '{pick_target}' → place '{place_target}'."
-            ),
+            message="Pick and place pre-flight check passed.",
         )
 
-    @require_robot_active
+    # ------------------------------------------------------------------
+    # execute
+    # ------------------------------------------------------------------
+
     def execute(
         self,
+        item: str,
+        home_position: str,
+        pick_approach: str,
         pick_target: str,
+        place_approach: str,
         place_target: str,
-        pick_approach: str = "",
-        place_approach: str = "",
-        motion_type: str = "MoveJ",
-        grasp_force: float = 0.0,
-        grasp_width: float = 0.0,
-        release_width: float = 0.0,
-        skip_feasibility_check: bool = False,
+        transit_motion: str = "MoveL",
+        initial_motion: str = "MoveL",
     ) -> SkillResult:
         """
-        Execute the pick-and-place motion sequence.
-
-        Motion sequence:
-          1. Transit to pick_approach          (motion_type)
-          2. MoveL plunge to pick_target       (always linear)
-          3. Grasp                             (optional — skipped with warning if unavailable)
-          4. MoveL retract to pick_approach    (always linear)
-          5. Transit to place_approach         (motion_type)
-          6. MoveL plunge to place_target      (always linear)
-          7. Release                           (optional — skipped with warning if unavailable)
-          8. MoveL retract to place_approach   (always linear)
-
-        Any step failure returns immediately with that step's SkillResult.
+        Execute pick and place.
 
         Args:
-            pick_target:          RoboDK target name for the grasp point.
-            place_target:         RoboDK target name for the release point.
-            pick_approach:        Approach target name for pick side; auto-searched if empty.
-            place_approach:       Approach target name for place side; auto-searched if empty.
-            motion_type:          Transit motion type — "MoveJ" (default) or "MoveL".
-            grasp_force:          Gripping force in N passed to Grasp (0 = gripper default).
-            grasp_width:          Jaw width at grasp point in mm (0 = gripper default).
-            release_width:        Jaw opening width in mm after release (0 = fully open).
-            skip_feasibility_check: Accepted for signature consistency with check(); has no
-                                  effect here since execute() does not perform feasibility checks.
+            item:            RoboDK name of the workpiece.
+            home_position:   Home position for this part move.
+            pick_approach:   Approach/depart point near the pick location.
+            pick_target:     Precise grasp point (MoveL).
+            place_approach:  Approach/depart point near the place location.
+            place_target:    Precise place point (MoveL).
+            transit_motion:  "MoveL" (default) or "MoveJ" for the with-workpiece transit.
+            initial_motion:  "MoveL" (default) or "MoveJ" for the initial move to pick_approach.
 
         Returns:
-            SkillResult with success=True on full completion.
+            SkillResult — fails fast on first primitive failure.
         """
-        err = self._validate_motion_type(motion_type)
-        if err:
-            return err
-
-        ctx = self._get_context()
-        if isinstance(ctx, SkillResult):
-            return ctx
-
-        pick_item, err = self._resolve_item(ctx, pick_target, "pick_target")
-        if err:
-            return err
-        place_item, err = self._resolve_item(ctx, place_target, "place_target")
-        if err:
-            return err
-        pick_app_item, err = self._resolve_approach(ctx, pick_item, pick_approach, "pick_approach")
-        if err:
-            return err
-        place_app_item, err = self._resolve_approach(ctx, place_item, place_approach, "place_approach")
-        if err:
-            return err
-
-        if skip_feasibility_check:
-            logger.debug(
-                "execute() — skip_feasibility_check=True has no effect here; "
-                "feasibility checks only apply in check()."
+        # Validate motion parameters first (fast-fail before any motion)
+        if initial_motion not in _VALID_TRANSIT_MOTIONS:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type="INVALID_PARAM",
+                message=f"initial_motion must be 'MoveJ' or 'MoveL', got '{initial_motion}'.",
+            )
+        if transit_motion not in _VALID_TRANSIT_MOTIONS:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type="INVALID_PARAM",
+                message=f"transit_motion must be 'MoveJ' or 'MoveL', got '{transit_motion}'.",
             )
 
-        move_transit = self.primitives["MoveJ" if motion_type == "MoveJ" else "MoveL"]
-        move_linear  = self.primitives["MoveL"]
+        # Resolve all symbols up front
+        ctx = RobotContext.instance()
+        if ctx is None:
+            return _CTX_NOT_INITIALIZED
+        item_obj, err = _resolve(item, ctx)
+        if err:
+            return err
+        pick_approach_obj, err = _resolve(pick_approach, ctx)
+        if err:
+            return err
+        pick_target_obj, err = _resolve(pick_target, ctx)
+        if err:
+            return err
+        place_approach_obj, err = _resolve(place_approach, ctx)
+        if err:
+            return err
+        place_target_obj, err = _resolve(place_target, ctx)
+        if err:
+            return err
+        home_position_obj, err = _resolve(home_position, ctx)
+        if err:
+            return err
 
-        # --- Step 1: transit to pick approach ---
-        logger.info("Step 1/8 — transit to pick_approach '%s'", pick_app_item.Name())
-        result = move_transit.execute(pick_app_item)
+        # Step 1: move to pick approach point
+        logger.info("Step 1/10: %s to home_position '%s'...", initial_motion, home_position)
+        result = self.primitives[initial_motion].execute(target=home_position_obj)
         if not result.success:
-            result.message = f"[Step 1 transit → pick_approach] {result.message}"
             return result
 
-        # --- Step 2: linear plunge to pick target ---
-        logger.info("Step 2/8 — MoveL plunge to pick_target '%s'", pick_target)
-        result = move_linear.execute(pick_item)
+        
+        logger.info("Step 2/10: %s to pick_approach '%s'...", 'MoveL', pick_approach)
+        result = self.primitives['MoveL'].execute(target=pick_approach_obj)
         if not result.success:
-            result.message = f"[Step 2 approach → pick_target] {result.message}"
             return result
 
-        # --- Step 3: grasp ---
-        if "Grasp" in self.primitives:
-            logger.info("Step 3/8 — Grasp (force=%.1f N, width=%.1f mm)", grasp_force, grasp_width)
-            result = self.primitives["Grasp"].execute(grasp_force, grasp_width)
-            if not result.success:
-                result.message = f"[Step 3 grasp] {result.message}"
-                return result
-        else:
-            logger.warning(
-                "Step 3/8 — No 'Grasp' primitive registered; skipping grasp at '%s'",
-                pick_target,
-            )
-
-        # --- Step 4: linear retract to pick approach ---
-        logger.info("Step 4/8 — MoveL retract to pick_approach '%s'", pick_app_item.Name())
-        result = move_linear.execute(pick_app_item)
+        # Step 2: linear precise approach to pick point
+        logger.info("Step 3/10: MoveL to pick_target '%s'...", pick_target)
+        result = self.primitives['MoveL'].execute(target=pick_target_obj)
         if not result.success:
-            result.message = f"[Step 4 retract from pick] {result.message}"
             return result
 
-        # --- Step 5: transit to place approach ---
-        logger.info("Step 5/8 — transit to place_approach '%s'", place_app_item.Name())
-        result = move_transit.execute(place_app_item)
+        # Step 3: grasp workpiece
+        logger.info("Step 4/10: Grasp '%s'...", item)
+        result = self.primitives['Grasp'].execute(expected_item=item_obj)
         if not result.success:
-            result.message = f"[Step 5 transit → place_approach] {result.message}"
             return result
 
-        # --- Step 6: linear plunge to place target ---
-        logger.info("Step 6/8 — MoveL plunge to place_target '%s'", place_target)
-        result = move_linear.execute(place_item)
+        # Step 4: linear depart (retrace approach with workpiece)
+        logger.info("Step 5/10: MoveL depart to pick_approach '%s'...", pick_approach)
+        result = self.primitives['MoveL'].execute(target=pick_approach_obj)
         if not result.success:
-            result.message = f"[Step 6 approach → place_target] {result.message}"
             return result
 
-        # --- Step 7: release ---
-        if "Release" in self.primitives:
-            logger.info("Step 7/8 — Release (width=%.1f mm)", release_width)
-            result = self.primitives["Release"].execute(release_width)
-            if not result.success:
-                result.message = f"[Step 7 release] {result.message}"
-                return result
-        else:
-            logger.warning(
-                "Step 7/8 — No 'Release' primitive registered; skipping release at '%s'",
-                place_target,
-            )
-
-        # --- Step 8: linear retract to place approach ---
-        logger.info("Step 8/8 — MoveL retract to place_approach '%s'", place_app_item.Name())
-        result = move_linear.execute(place_app_item)
+        # Step 5: transit to place approach (with workpiece)
+        logger.info("Step 6/10: %s transit to place_approach '%s'...", transit_motion, place_approach)
+        result = self.primitives[transit_motion].execute(target=place_approach_obj)
         if not result.success:
-            result.message = f"[Step 8 retract from place] {result.message}"
             return result
 
-        try:
-            final_state = RobotState(
-                joints=list(ctx.robot.Joints()),
-                pose=ctx.robot.Pose(),
-            )
-        except Exception:
-            final_state = RobotState()
+        # Step 6: linear precise approach to place point
+        logger.info("Step 7/10: MoveL to place_target '%s'...", place_target)
+        result = self.primitives['MoveL'].execute(target=place_target_obj)
+        if not result.success:
+            return result
 
-        logger.info(
-            "PickAndPlace completed: '%s' → '%s'", pick_target, place_target
-        )
+        # Step 7: release workpiece
+        logger.info("Step 8/10: Release '%s'...", item)
+        result = self.primitives['Release'].execute(expected_item=item_obj)
+        if not result.success:
+            return result
+
+        # Step 8: linear depart (retrace approach, empty gripper)
+        logger.info("Step 9/10: MoveL depart to place approach. '%s'...", place_approach_obj)
+        result = self.primitives['MoveL'].execute(target=place_approach_obj)
+        if not result.success:
+            return result
+        
+        # Step 10: Linear move back to home position
+        logger.info("Step 10/10: MoveL to home_position '%s'...", home_position)
+        result = self.primitives['MoveL'].execute(target=home_position_obj)
+        if not result.success:
+            return result
+        
+        
+        logger.info("Pick and place completed: '%s' moved from '%s' to '%s'.", item, pick_target, place_target)
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.EXECUTION,
-            robot_state=final_state,
-            message=f"PickAndPlace completed: '{pick_target}' → '{place_target}'.",
-            data={"pick_target": pick_target, "place_target": place_target},
+            message=f"Pick and place completed: '{item}' moved from '{pick_target}' to '{place_target}'.",
         )
 
-    @require_robot_active
+    # ------------------------------------------------------------------
+    # try_execute
+    # ------------------------------------------------------------------
+
     def try_execute(
         self,
+        item: str,
+        home_position: str,
+        pick_approach: str,
         pick_target: str,
+        place_approach: str,
         place_target: str,
-        pick_approach: str = "",
-        place_approach: str = "",
-        motion_type: str = "MoveJ",
-        grasp_force: float = 0.0,
-        grasp_width: float = 0.0,
-        release_width: float = 0.0,
-        skip_feasibility_check: bool = False,
+        transit_motion: str = "MoveL",
+        initial_motion: str = "MoveL",
     ) -> SkillResult:
-        """
-        Check feasibility then execute if valid.  Returns the check failure
-        directly if pre-validation fails.
+        """Run pre-flight check, then execute pick-and-place if the check passed.
 
         Args:
-            pick_target:          RoboDK target name for the grasp point.
-            place_target:         RoboDK target name for the release point.
-            pick_approach:        Approach target name for pick side; auto-searched if empty.
-            place_approach:       Approach target name for place side; auto-searched if empty.
-            motion_type:          Transit motion type — "MoveJ" (default) or "MoveL".
-            grasp_force:          Gripping force in N passed to Grasp (0 = gripper default).
-            grasp_width:          Jaw width at grasp point in mm (0 = gripper default).
-            release_width:        Jaw opening width in mm after release (0 = fully open).
-            skip_feasibility_check: DEBUG ONLY — forwarded to check(); skips all segment
-                                  feasibility checks (IK, singularity, collision).
-                                  See check() for full details.
-        """
-        check_result = self.check(
-            pick_target, place_target, pick_approach, place_approach, motion_type,
-            grasp_force, grasp_width, release_width, skip_feasibility_check,
-        )
-        if not check_result.success:
-            return check_result
-        return self.execute(  # type: ignore[return-value]
-            pick_target, place_target, pick_approach, place_approach, motion_type,
-            grasp_force, grasp_width, release_width, skip_feasibility_check,
-        )
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _get_context(self):
-        """Return the live RobotContext or a SkillResult failure."""
-        from SkiLib.robotcontext import RobotContext
-        ctx = RobotContext.instance()
-        if ctx is None:
-            return SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_INVALID_PARAM,
-                message="RobotContext is not initialized. Call RobotContext() before using skills.",
-                suggestion="Ensure RobotContext() is constructed at application startup.",
-            )
-        return ctx
-
-    def _validate_motion_type(self, motion_type: str) -> Optional[SkillResult]:
-        """Return a failure SkillResult if motion_type is not 'MoveJ' or 'MoveL'."""
-        if motion_type not in ("MoveJ", "MoveL"):
-            return SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_INVALID_PARAM,
-                message=(
-                    f"Invalid motion_type '{motion_type}'. "
-                    "Accepted values: 'MoveJ', 'MoveL'."
-                ),
-                suggestion="Pass motion_type='MoveJ' (default) or motion_type='MoveL'.",
-            )
-        return _OK
-
-    def _resolve_item(self, ctx, name: str, label: str) -> Tuple:
-        """
-        Look up a RoboDK target by name.
+            item:            RoboDK name of the workpiece to grasp/release.
+            home_position:   Target name for the initial and final home position.
+            pick_approach:   Target name for the approach/depart point near pick.
+            pick_target:     Target name for the linear-move precise grasp point.
+            place_approach:  Target name for the transit destination / depart point near place.
+            place_target:    Target name for the linear-move precise place point.
+            transit_motion:  Motion type for the pick_approach→place_approach segment.
+                             Must be "MoveL" (default) or "MoveJ".
+            initial_motion:  Motion type for the initial move to pick_approach.
+                             Must be "MoveL" (default) or "MoveJ".
 
         Returns:
-            (item, None) on success
-            (None, SkillResult) if the target does not exist
+            SkillResult — the check result on pre-flight failure, otherwise the execute result.
         """
-        item = ctx.RDK.Item(name, robolink.ITEM_TYPE_TARGET)
-        if not item.Valid():
-            return None, SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_INVALID_PARAM,
-                message=f"RoboDK target '{name}' not found (expected for {label}).",
-                suggestion=(
-                    f"Verify that a target named '{name}' exists in the RoboDK station."
-                ),
-            )
-        return item, _OK
-
-    def _resolve_approach(self, ctx, target_item, explicit_name: str, label: str) -> Tuple:
-        """
-        Resolve an approach target.
-
-        Priority:
-          1. explicit_name if provided — must exist or returns an error.
-          2. Auto-search by naming convention suffixes then prefixes.
-
-        Naming conventions tried (in order):
-          {target_name}_App  →  {target_name}_Approach  →  {target_name}_approach  →  App_{target_name}
-
-        Returns:
-            (item, None) on success
-            (None, SkillResult) if no matching target is found
-        """
-        target_name = target_item.Name()
-
-        if explicit_name:
-            item = ctx.RDK.Item(explicit_name, robolink.ITEM_TYPE_TARGET)
-            if item.Valid():
-                logger.debug(
-                    "Using explicit approach target '%s' for %s", explicit_name, label
-                )
-                return item, _OK
-            return None, SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_INVALID_PARAM,
-                message=(
-                    f"Explicit approach target '{explicit_name}' not found in RoboDK station "
-                    f"(expected for {label})."
-                ),
-                suggestion=(
-                    f"Create a target named '{explicit_name}' in RoboDK, "
-                    "or omit the argument to enable naming-convention auto-search."
-                ),
-            )
-
-        candidates = (
-            [f"{target_name}{s}" for s in _APPROACH_SUFFIXES]
-            + [f"{p}{target_name}" for p in _APPROACH_PREFIXES]
-        )
-        for candidate in candidates:
-            item = ctx.RDK.Item(candidate, robolink.ITEM_TYPE_TARGET)
-            if item.Valid():
-                logger.info(
-                    "Auto-resolved approach target '%s' for %s", candidate, label
-                )
-                return item, _OK
-
-        return None, SkillResult(
-            success=False,
-            execution_phase=ExecutionPhase.VALIDATION,
-            error_type=ERROR_INVALID_PARAM,
-            message=(
-                f"No approach target found for '{target_name}' ({label}). "
-                f"Searched: {candidates}."
-            ),
-            suggestion=(
-                f"Create an approach target in RoboDK using one of these names: "
-                + ", ".join(f"'{c}'" for c in candidates)
-                + f". Or pass the name explicitly via the {label} parameter."
-            ),
-        )
-
-    def _check_segment(
-        self,
-        robot,
-        j_start: list,
-        target_item,
-        motion: str,
-        label: str,
-    ) -> Optional[SkillResult]:
-        """
-        Check one motion segment for IK feasibility and collisions.
-        Assumes the caller has already enabled collision detection.
-
-        Args:
-            robot:       RoboDK robot Item.
-            j_start:     Start configuration as a list of joint angles (degrees).
-            target_item: RoboDK target Item (destination).
-            motion:      "MoveL" or "MoveJ".
-            label:       Human-readable segment label for error messages.
-
-        Returns:
-            None if the segment is feasible, or a SkillResult failure otherwise.
-        """
-        if motion == "MoveL":
-            # Express target pose in the robot base frame for MoveL_Test
-            target_pose = robot.PoseFrame().inv() * target_item.Pose()
-            code = robot.MoveL_Test(j_start, target_pose)
-            if code == 0:
-                return _OK
-            if code == -2:
-                return SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.PLANNING,
-                    error_type=ERROR_IK_FAILURE,
-                    message=f"[{label}] Target pose is outside robot reachable workspace.",
-                    suggestion=(
-                        "Verify the target coordinates and orientation. "
-                        "Consider adjusting the approach direction or robot configuration."
-                    ),
-                )
-            if code == -1:
-                return SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.PLANNING,
-                    error_type=ERROR_IK_FAILURE,
-                    message=(
-                        f"[{label}] Linear path passes through a singularity "
-                        "or workspace boundary."
-                    ),
-                    suggestion=(
-                        "The robot cannot maintain a straight Cartesian path to the target. "
-                        "Use MoveJ for the transit, or approach from a different direction."
-                    ),
-                )
-            # code > 0: collision count
-            return SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.PLANNING,
-                error_type=ERROR_COLLISION,
-                message=f"[{label}] Linear path would cause {code} collision(s).",
-                data={"collision_count": code},
-                suggestion=(
-                    "Check the collision map to identify colliding pairs "
-                    "and adjust the approach direction or target placement."
-                ),
-            )
-
-        else:  # MoveJ
-            j_target = list(target_item.Joints())
-            code = robot.MoveJ_Test(j_start, j_target)
-            if code == 0:
-                return _OK
-            return SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.PLANNING,
-                error_type=ERROR_COLLISION,
-                message=f"[{label}] Joint path would cause {code} collision(s).",
-                data={"collision_count": code},
-                suggestion=(
-                    "Check the collision map and adjust the path, "
-                    "robot configuration, or target placement."
-                ),
-            )
+        if self._should_skip_check():
+            logger.debug("Skipping pre-flight check (debug_skip_check=True)")
+            return self.execute(item, home_position, pick_approach, pick_target, place_approach, place_target, transit_motion, initial_motion)
+        result = self.check(item, home_position, pick_approach, pick_target, place_approach, place_target, transit_motion, initial_motion)
+        if not result.success:
+            logger.warning("Pre-flight check failed: %s", result.message)
+            return result
+        return self.execute(item, home_position, pick_approach, pick_target, place_approach, place_target, transit_motion, initial_motion)

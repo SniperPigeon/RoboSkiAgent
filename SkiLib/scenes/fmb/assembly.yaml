@@ -1,0 +1,48 @@
+assembly_sequence:
+  - Part_A_1
+  - Part_A_2
+  - Part_B
+  - Part_C
+
+parts:
+  Part_A_1:
+    place_target: Part_A_1_Place
+    expected_object_yaw_deg: 0.0
+    default_grasp_profile: short_edge
+    grasp_profiles:
+      short_edge:
+        description: Default A-part grasp; TCP yaw follows the object yaw.
+        tcp_yaw_offset_deg: 0.0
+
+  Part_A_2:
+    place_target: Part_A_2_Place
+    expected_object_yaw_deg: 0.0
+    default_grasp_profile: short_edge
+    grasp_profiles:
+      short_edge:
+        description: Default A-part grasp; TCP yaw follows the object yaw.
+        tcp_yaw_offset_deg: 0.0
+
+  Part_B:
+    place_target: Part_B_Place
+    expected_object_yaw_deg: 0.0
+    default_grasp_profile: long_edge
+    grasp_profiles:
+      long_edge:
+        description: Default B-part grasp rotated 90 deg from the previous setup; TCP yaw is object yaw plus 180 deg.
+        tcp_yaw_offset_deg: 180.0
+      short_edge:
+        description: Previous B-part grasp; TCP yaw is object yaw plus 90 deg.
+        tcp_yaw_offset_deg: 90.0
+
+  Part_C:
+    place_target: Part_C_Place
+    expected_object_yaw_deg: 0.0
+    default_grasp_profile: long_edge
+    grasp_profiles:
+      short_edge:
+        description: Previous C-part grasp; TCP yaw follows the object yaw.
+        tcp_yaw_offset_deg: 0.0
+      long_edge:
+        description: Default C-part grasp rotated 90 deg from the previous setup; TCP yaw is object yaw plus 90 deg.
+        tcp_yaw_offset_deg: 90.0

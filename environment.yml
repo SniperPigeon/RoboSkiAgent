@@ -1,0 +1,16 @@
+name: rsagent
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - torchvision
+  - pytorch
+  - transformers
+  - openai
+  - langchain
+  - langchain-openai
+  - python-dotenv
+  - pip:
+    - robodk
+    - genesis-world
+prefix: /opt/anaconda3/envs/rsagent

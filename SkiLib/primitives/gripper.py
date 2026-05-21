@@ -1,283 +1,248 @@
+from typing import Optional
+
+import numpy as np
+
 from SkiLib.base import (
-    BasePrimitive, SkillResult, ExecutionPhase,
-    ERROR_INVALID_PARAM, require_robot_active,
+    BasePrimitive,
+    ERROR_INVALID_PARAM,
+    ExecutionPhase,
+    SkillResult,
+    require_robot_active,
 )
-from robodk import robolink
+from SkiLib.genesis.motion import get_tcp_pos
+from SkiLib.genesis.scene import (
+    FMB_PART_HEIGHT,
+    FMB_PART_REF_Z_FROM_BOTTOM,
+    TCP_OFFSET_Z,
+    fmb_grasp_z_from_bottom,
+)
+from SkiLib.genesis.types import SceneObject
 
-from SkiLib.log import get_logger
+ERROR_ITEM_NOT_FOUND = "ITEM_NOT_FOUND"
+ERROR_GRIPPER_FAILURE = "GRIPPER_FAILURE"
 
-logger = get_logger(__name__)
-
-# Domain-specific error constants for gripper primitives
-ERROR_GRASP_NO_OBJECT       = "GRASP_NO_OBJECT"        # AttachClosest found nothing in range
-ERROR_GRASP_ALREADY_HOLDING = "GRASP_ALREADY_HOLDING"  # held_item already set (pre-check only)
-ERROR_RELEASE_NOTHING_HELD  = "RELEASE_NOTHING_HELD"   # held_item is None (pre-check only)
-
-
-def _get_context():
-    """Return RobotContext, or raise RuntimeError if not yet initialized."""
-    from SkiLib.robotcontext import RobotContext
-    ctx = RobotContext.instance()
-    if ctx is None:
-        raise RuntimeError("RobotContext is not initialized.")
-    return ctx
+# Distance threshold for considering the TCP "close enough" to attempt a grasp.
+GRASP_PROXIMITY_THRESHOLD = 0.18  # metres
 
 
 class Grasp(BasePrimitive):
-    """
-    Attach the nearest object to the robot's active tool (simulates gripper closing).
+    """Genesis gripper close + weld-constraint attachment primitive."""
 
-    RoboDK mechanism: tool.AttachClosest() re-parents the closest object to the
-    tool item so it follows the TCP during subsequent moves.
+    TOOL_NAME = "Grasp"
+    TOOL_DESCRIPTION = "Close the gripper around a named Genesis workpiece."
+    TOOL_PARAMETERS = {
+        "expected_item": {
+            "type": "str",
+            "required": True,
+            "description": "Genesis object name of the workpiece to grasp.",
+            "resolver": "object",
+        },
+    }
 
-    Parameters:
-        force: Target gripping force in Newtons (0 = use gripper default).
-               Logged in simulation; passed to gripper controller on real hardware.
-        width: Target jaw width at grasp point in mm (0 = use gripper default).
-               Useful for adaptive grippers; ignored for simple open/close grippers.
-    """
+    def __init__(self, runtime):
+        super().__init__(runtime)
 
-    def __init__(self, robot_object, RDK_object):
-        self.robot: robolink.Item     = robot_object
-        self.RDK:   robolink.Robolink = RDK_object
-
-    def check(self, force: float = 0.0, width: float = 0.0) -> SkillResult:
-        """
-        Pre-check grasp pre-conditions.
-
-        Validates:
-          1. force and width are non-negative.
-          2. A valid tool is attached to the robot.
-          3. No object is already tracked as held.
-
-        Note: returning success=False here does NOT prevent execute() from running.
-        execute() is safe to call directly and handles state independently.
-        """
-        if force < 0.0:
+    def check(self, expected_item: SceneObject, tool: Optional[object] = None) -> SkillResult:
+        if not isinstance(expected_item, SceneObject):
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
                 error_type=ERROR_INVALID_PARAM,
-                message=f"force must be >= 0 (got {force} N).",
-                suggestion="Use force=0 to apply the gripper's default force.",
+                message="Invalid Grasp expected_item. Expected a SceneObject.",
             )
-        if width < 0.0:
+        if self.runtime.held_item_name is not None:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_INVALID_PARAM,
-                message=f"width must be >= 0 (got {width} mm).",
-                suggestion="Use width=0 to apply the gripper's default jaw width.",
+                error_type=ERROR_GRIPPER_FAILURE,
+                message=f"Gripper is already holding '{self.runtime.held_item_name}'. Release before grasping.",
+                suggestion="Call Release before attempting a new Grasp.",
             )
-
-        tool = self.robot.getLink(robolink.ITEM_TYPE_TOOL)
-        if not tool.Valid():
+        try:
+            tcp_pos = get_tcp_pos(self.runtime)
+            obj_pos = np.array(expected_item.entity.get_pos().tolist(), dtype=float)
+            part_height = FMB_PART_HEIGHT.get(expected_item.name)
+            ref_z_from_bottom = FMB_PART_REF_Z_FROM_BOTTOM.get(expected_item.name)
+            if part_height is not None and ref_z_from_bottom is not None:
+                expected_tcp_pos = obj_pos.copy()
+                expected_tcp_pos[2] += (
+                    fmb_grasp_z_from_bottom(expected_item.name, part_height)
+                    - ref_z_from_bottom
+                    + TCP_OFFSET_Z
+                )
+            else:
+                expected_tcp_pos = obj_pos
+            dist = float(np.linalg.norm(tcp_pos - expected_tcp_pos))
+            if dist > GRASP_PROXIMITY_THRESHOLD:
+                return SkillResult(
+                    success=False,
+                    execution_phase=ExecutionPhase.PLANNING,
+                    error_type=ERROR_GRIPPER_FAILURE,
+                    message=(
+                        f"TCP is {dist:.3f} m from '{expected_item.name}' grasp point "
+                        f"(threshold {GRASP_PROXIMITY_THRESHOLD} m). Move closer before grasping."
+                    ),
+                    suggestion="Execute a MoveL to the pick target before calling Grasp.",
+                    data={"tcp_to_object_dist": dist},
+                )
+        except Exception as e:
             return SkillResult(
                 success=False,
-                execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_INVALID_PARAM,
-                message="No valid tool attached to the robot.",
-                suggestion="Attach a gripper tool to the robot in RoboDK before grasping.",
+                execution_phase=ExecutionPhase.PLANNING,
+                error_type=ERROR_GRIPPER_FAILURE,
+                message=f"Grasp proximity check failed: {type(e).__name__}: {e}",
             )
-
-        ctx = _get_context()
-        if ctx.held_item is not None:
-            return SkillResult(
-                success=False,
-                execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_GRASP_ALREADY_HOLDING,
-                message=f"Robot is already holding '{ctx.held_item.Name()}'. Release it first.",
-                suggestion="Call Release.execute() before attempting another Grasp.",
-            )
-
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
-            message="Grasp pre-conditions satisfied.",
+            message=f"Grasp pre-check passed. TCP is {dist:.3f} m from '{expected_item.name}' grasp point.",
+            data={"tcp_to_object_dist": dist},
         )
 
     @require_robot_active
-    def execute(self, force: float = 0.0, width: float = 0.0) -> SkillResult:
-        """
-        Close the gripper: attach the nearest RoboDK object to the active tool.
+    def execute(self, expected_item: SceneObject) -> SkillResult:
+        return self._submit_to_controller(self._execute_body, expected_item)
 
-        force: gripping force in N (0 = gripper default). Logged in simulation.
-        width: jaw closing width in mm (0 = gripper default). Logged in simulation.
-
-        Succeeds even if check() warned (e.g. already-holding state is overwritten).
-        Fails only when AttachClosest() returns an invalid Item (nothing in range).
-        """
-        try:
-            ctx = _get_context()
-            tool = self.robot.getLink(robolink.ITEM_TYPE_TOOL)
-            if not tool.Valid():
-                return SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.EXECUTION,
-                    error_type=ERROR_INVALID_PARAM,
-                    message="No valid tool attached to the robot.",
-                    suggestion="Attach a gripper tool to the robot in RoboDK.",
-                )
-
-            if force > 0.0 or width > 0.0:
-                logger.debug(
-                    "Grasp parameters — force: %.1f N, width: %.1f mm "
-                    "(simulation: logged only, not sent to hardware).",
-                    force, width,
-                )
-
-            item = tool.AttachClosest()
-            if not item.Valid():
-                return SkillResult(
-                    success=False,
-                    execution_phase=ExecutionPhase.EXECUTION,
-                    error_type=ERROR_GRASP_NO_OBJECT,
-                    message="AttachClosest() found no object within range.",
-                    suggestion=(
-                        "Verify the robot is positioned close enough to the target object. "
-                        "RoboDK default tolerance is ~200 mm from the TCP."
-                    ),
-                    needs_hilp=True,
-                )
-
-            ctx.held_item = item
-            logger.info(
-                "Grasp: attached '%s' to tool '%s' (force=%.1f N, width=%.1f mm).",
-                item.Name(), tool.Name(), force, width,
-            )
+    def _execute_body(self, expected_item: SceneObject) -> SkillResult:
+        if not isinstance(expected_item, SceneObject):
             return SkillResult(
-                success=True,
-                execution_phase=ExecutionPhase.EXECUTION,
-                message=f"Grasped '{item.Name()}' successfully.",
-                data={"item_name": item.Name(), "force_n": force, "width_mm": width},
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type=ERROR_INVALID_PARAM,
+                message="Invalid Grasp expected_item. Expected a SceneObject.",
             )
+        if self.runtime.held_item_name is not None:
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.EXECUTION,
+                error_type=ERROR_GRIPPER_FAILURE,
+                robot_state=self.runtime.get_current_state(),
+                message=f"Gripper is already holding '{self.runtime.held_item_name}'.",
+                suggestion="Call Release before attempting a new Grasp.",
+            )
+        try:
+            self.runtime.unmark_assembled_object(expected_item.name)
+            tcp_link = self.runtime.robot.get_link(self.runtime.bundle.tcp_link_name)
+            obj_link = expected_item.entity.base_link
+            self.runtime.rigid_solver.add_weld_constraint(obj_link.idx, tcp_link.idx)
+            self.runtime.held_item_name = expected_item.name
+            self.runtime._weld_pair = (obj_link.idx, tcp_link.idx)
+            self.runtime.scene.step()
+            self.runtime.stabilize_assembled_objects()
         except Exception as e:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
-                error_type="TIMEOUT",
-                message=f"Grasp failed unexpectedly: {type(e).__name__}: {e}",
-                suggestion="Check the RoboDK connection and station state.",
-                needs_hilp=True,
+                error_type=ERROR_GRIPPER_FAILURE,
+                robot_state=self.runtime.get_current_state(),
+                message=f"Grasp weld constraint failed: {type(e).__name__}: {e}",
+                suggestion="Check that the object has not already been welded.",
             )
+        return SkillResult(
+            success=True,
+            execution_phase=ExecutionPhase.EXECUTION,
+            robot_state=self.runtime.get_current_state(),
+            message=f"Grasped '{expected_item.name}' via weld constraint.",
+            data={"held_item": expected_item.name},
+        )
 
-    def try_execute(self, force: float = 0.0, width: float = 0.0) -> SkillResult:
-        check = self.check(force, width)
-        if not check.success:
-            return check
-        return self.execute(force, width)  # type: ignore
+    def try_execute(self, expected_item: SceneObject, tool: Optional[object] = None) -> SkillResult:
+        if not self._should_skip_check():
+            check = self.check(expected_item, tool)
+            if not check.success:
+                return check
+        return self.execute(expected_item)
 
 
 class Release(BasePrimitive):
-    """
-    Detach the currently held object from the tool (simulates gripper opening).
+    """Genesis gripper open + weld-constraint release primitive."""
 
-    RoboDK mechanism: held_item.setParentStatic(station) re-parents the object
-    back to the station root, preserving its current world-frame position.
+    TOOL_NAME = "Release"
+    TOOL_DESCRIPTION = "Open the gripper and release the currently held Genesis workpiece."
+    TOOL_PARAMETERS = {
+        "expected_item": {
+            "type": "str",
+            "required": True,
+            "description": "Genesis object name of the workpiece to release.",
+            "resolver": "object",
+        },
+    }
 
-    Parameters:
-        width: Jaw opening width in mm after release (0 = fully open / gripper default).
-               Logged in simulation; passed to gripper controller on real hardware.
-    """
+    def __init__(self, runtime):
+        super().__init__(runtime)
 
-    def __init__(self, robot_object, RDK_object):
-        self.robot: robolink.Item     = robot_object
-        self.RDK:   robolink.Robolink = RDK_object
-
-    def check(self, width: float = 0.0) -> SkillResult:
-        """
-        Pre-check release pre-conditions.
-
-        Validates:
-          1. width is non-negative.
-          2. held_item is currently set.
-
-        Note: execute() proceeds even without a tracked held_item — the gripper
-        opens regardless. This is intentional (e.g. safety open, state recovery).
-        """
-        if width < 0.0:
+    def check(self, expected_item: SceneObject, tool: Optional[object] = None) -> SkillResult:
+        if not isinstance(expected_item, SceneObject):
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
                 error_type=ERROR_INVALID_PARAM,
-                message=f"width must be >= 0 (got {width} mm).",
-                suggestion="Use width=0 for fully open (gripper default).",
+                message="Invalid Release expected_item. Expected a SceneObject.",
             )
-
-        ctx = _get_context()
-        if ctx.held_item is None:
+        if self.runtime.held_item_name != expected_item.name:
+            held = self.runtime.held_item_name or "nothing"
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
-                error_type=ERROR_RELEASE_NOTHING_HELD,
-                message="No object is currently tracked as held.",
-                suggestion=(
-                    "Call Grasp.execute() first, or call Release.execute() directly "
-                    "to open the gripper unconditionally."
-                ),
+                error_type=ERROR_GRIPPER_FAILURE,
+                message=f"Cannot release '{expected_item.name}': gripper is holding '{held}'.",
+                suggestion="Ensure the correct item was grasped before calling Release.",
             )
-
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
-            message=f"Release pre-conditions satisfied (holding '{ctx.held_item.Name()}').",
+            message=f"Release pre-check passed for '{expected_item.name}'.",
         )
 
     @require_robot_active
-    def execute(self, width: float = 0.0) -> SkillResult:
-        """
-        Open the gripper: detach the tracked object from the tool.
+    def execute(self, expected_item: SceneObject) -> SkillResult:
+        return self._submit_to_controller(self._execute_body, expected_item)
 
-        width: jaw opening width in mm after release (0 = fully open). Logged in simulation.
-
-        If no object is currently tracked (held_item is None), the call is a no-op
-        success — the gripper opens even if nothing was formally grasped.
-        """
-        try:
-            ctx = _get_context()
-
-            if width > 0.0:
-                logger.debug(
-                    "Release parameters — width: %.1f mm "
-                    "(simulation: logged only, not sent to hardware).",
-                    width,
-                )
-
-            if ctx.held_item is None:
-                logger.warning("Release.execute(): no held_item tracked; treating as no-op.")
-                return SkillResult(
-                    success=True,
-                    execution_phase=ExecutionPhase.EXECUTION,
-                    message="Gripper opened; no tracked object was held.",
-                    data={"item_name": None, "width_mm": width},
-                )
-
-            item_name = ctx.held_item.Name()
-            ctx.held_item.setParentStatic(self.RDK.ActiveStation())
-            ctx.held_item = None
-
-            logger.info(
-                "Release: detached '%s' back to station root (width=%.1f mm).",
-                item_name, width,
-            )
+    def _execute_body(self, expected_item: SceneObject) -> SkillResult:
+        if not isinstance(expected_item, SceneObject):
             return SkillResult(
-                success=True,
-                execution_phase=ExecutionPhase.EXECUTION,
-                message=f"Released '{item_name}' successfully.",
-                data={"item_name": item_name, "width_mm": width},
+                success=False,
+                execution_phase=ExecutionPhase.VALIDATION,
+                error_type=ERROR_INVALID_PARAM,
+                message="Invalid Release expected_item. Expected a SceneObject.",
             )
+        if self.runtime._weld_pair is None or self.runtime.held_item_name != expected_item.name:
+            held = self.runtime.held_item_name or "nothing"
+            return SkillResult(
+                success=False,
+                execution_phase=ExecutionPhase.EXECUTION,
+                error_type=ERROR_GRIPPER_FAILURE,
+                robot_state=self.runtime.get_current_state(),
+                message=f"Cannot release '{expected_item.name}': gripper is holding '{held}'.",
+                suggestion="Ensure the correct item was grasped before calling Release.",
+            )
+        try:
+            obj_idx, tcp_idx = self.runtime._weld_pair
+            self.runtime.rigid_solver.delete_weld_constraint(obj_idx, tcp_idx)
+            self.runtime.held_item_name = None
+            self.runtime._weld_pair = None
+            snap_info = self.runtime.snap_object_to_place_target(expected_item.name)
+            self.runtime.scene.step()
+            self.runtime.stabilize_assembled_objects()
         except Exception as e:
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
-                error_type="TIMEOUT",
-                message=f"Release failed unexpectedly: {type(e).__name__}: {e}",
-                suggestion="Check the RoboDK connection and station state.",
-                needs_hilp=True,
+                error_type=ERROR_GRIPPER_FAILURE,
+                robot_state=self.runtime.get_current_state(),
+                message=f"Release weld constraint removal failed: {type(e).__name__}: {e}",
             )
+        return SkillResult(
+            success=True,
+            execution_phase=ExecutionPhase.EXECUTION,
+            robot_state=self.runtime.get_current_state(),
+            message=f"Released '{expected_item.name}', weld constraint removed.",
+            data={"released_item": expected_item.name, "placement_snap": snap_info},
+        )
 
-    def try_execute(self, width: float = 0.0) -> SkillResult:
-        check = self.check(width)
-        if not check.success:
-            return check
-        return self.execute(width)  # type: ignore
+    def try_execute(self, expected_item: SceneObject, tool: Optional[object] = None) -> SkillResult:
+        if not self._should_skip_check():
+            check = self.check(expected_item, tool)
+            if not check.success:
+                return check
+        return self.execute(expected_item)

@@ -1,34 +1,26 @@
 import importlib
+import inspect
 import pathlib
+from typing import Dict, Optional, TYPE_CHECKING
 
-from robodk import robolink    # RoboDK API
-from robodk import robomath    # Robot toolbox
-from typing import Dict, Optional, Type, TYPE_CHECKING
+from SkiLib.genesis.runtime import GenesisRuntime
+from SkiLib.log import get_logger
 
 if TYPE_CHECKING:
     from SkiLib.base import BasePrimitive
 
-# Forward and backwards compatible use of the RoboDK API:
-# Remove these 2 lines to follow python programming guidelines
-from robodk import *      # type: ignore # RoboDK API
-from robolink import *  # type: ignore
+logger = get_logger(__name__)
 
 
-# ============= Robot Context (Singleton) =============
 class RobotContext:
     """
-    Robot context singleton - manages RoboDK connection and primitive registry.
-    
-    Usage:
-        # Initialize once at program start
-        context = RobotContext()
-        
-        # Access primitives
-        moveJ = context.primitives.get('MoveJ')
-        
-        # Or get registry directly
-        registry = context.primitive_registry
+    Genesis robot context singleton.
+
+    This class intentionally keeps the old RobotContext name so Agent and
+    SkillRegistry call sites do not need to change while the runtime switches
+    from RoboDK to Genesis.
     """
+
     _instance = None
 
     def __new__(cls):
@@ -38,134 +30,186 @@ class RobotContext:
         return cls._instance
 
     @classmethod
-    def instance(cls) -> Optional['RobotContext']:
-        """Return the existing singleton if initialized, else None (no side effects)."""
+    def instance(cls) -> Optional["RobotContext"]:
         inst = cls._instance
-        if inst is not None and getattr(inst, '_initialized', False):
+        if inst is not None and getattr(inst, "_initialized", False):
             return inst
         return None
 
     def __init__(self):
-        # Prevent re-initialization
         if self._initialized:
             return
 
-        self.RDK = robolink.Robolink()
-        robot = self.RDK.Item('', robolink.ITEM_TYPE_ROBOT)
-        if robot is None or not robot.Valid():
-            raise Exception("No robot found in the RoboDK station")
-        self.robot = robot
-        self.robot_name = robot.Name()
+        self.runtime = GenesisRuntime()
+        self.robot = self.runtime.robot
+        self.scene = self.runtime.scene
+        self.robot_name = self.runtime.robot_name
 
-        # Safety flag: set True by Context Flush on failure; cleared on resume
         self.halt_flag: bool = False
+        self.debug_skip_check: bool = False
 
-        # Currently held item in the gripper; set by Grasp.execute(), cleared by Release.execute()
-        self.held_item: Optional[robolink.Item] = None
+        self.primitive_registry = PrimitiveRegistry(self.runtime)
 
-        # Auto-initialize primitive registry
-        self.primitive_registry = PrimitiveRegistry(self.robot, self.RDK)
+        from SkiLib.registry import SkillRegistry  # local import avoids circular dependency
+
+        SkillRegistry().set_robot_context(self)
+
+        from SkiLib.sensors import SensorRegistry  # local import avoids circular dependency
+
+        self.sensor_registry = SensorRegistry()
+        self.sensor_registry.initialize()
+
         self._initialized = True
-    
+        logger.info("RobotContext initialized with Genesis runtime.")
+
     @property
-    def primitives(self) -> Dict[str, 'BasePrimitive']:
-        """Quick access to primitive instances"""
+    def primitives(self) -> Dict[str, "BasePrimitive"]:
         return self.primitive_registry.get_all()
-    
-    # TODO Provide all variables in RoboDK Tree for LLM to access. But not sure where to put those.
+
+    @property
+    def sensor_tools(self) -> list:
+        return self.sensor_registry.get_tools()
+
+    @property
+    def is_simulation(self) -> bool:
+        return self.runtime.is_simulation
+
+    def get_current_state(self):
+        return self.runtime.get_current_state()
+
+    def get_gripper_state(self) -> dict:
+        return self.runtime.get_gripper_state()
+
+    def list_targets(self) -> list[str]:
+        return self.runtime.list_targets()
+
+    def list_objects(self) -> list[str]:
+        return self.runtime.list_objects()
+
+    def list_tools(self) -> list[str]:
+        return self.runtime.list_tools()
+
+    def check_item_exists(self, name: str) -> bool:
+        return self.runtime.check_item_exists(name)
+
+    def resolve_target(self, name: str):
+        return self.runtime.resolve_target(name)
+
+    def resolve_object(self, name: str):
+        return self.runtime.resolve_object(name)
+
+    def resolve_item(self, name: str):
+        return self.runtime.resolve_item(name)
+
+    def get_object_position(self, name: str) -> dict:
+        return self.runtime.get_object_position(name)
+
+    def compute_pick_pose(self, name: str, grasp_profile: str | None = None) -> dict:
+        return self.runtime.compute_pick_pose(name, grasp_profile)
 
 
-# ============= Primitive Registry (Singleton) =============
 class PrimitiveRegistry:
-    """
-    Manages all primitive instances. Auto-discovers and instantiates primitives.
-    
-    Architecture:
-        - Primitives are RoboDK-specific implementations
-        - Skills depend only on BasePrimitive interface (decoupled from RoboDK)
-        - Registry handles lifecycle and dependency injection
-    
-    Usage:
-        # Usually created automatically by RobotContext
-        registry = PrimitiveRegistry(robot, RDK)
-        
-        # Get specific primitive
-        moveJ = registry.get('MoveJ')
-        
-        # Get all primitives (for skill initialization)
-        all_primitives = registry.get_all()
-    """
+    """Auto-discovers and instantiates Genesis primitive classes."""
+
     _instance = None
-    
+
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
-    
-    def __init__(self, robot: robolink.Item, RDK: robolink.Robolink):
-        # Prevent re-initialization
-        if hasattr(self, '_initialized') and self._initialized:
+
+    def __init__(self, runtime: GenesisRuntime):
+        if self._initialized:
             return
-            
-        self.robot = robot
-        self.RDK = RDK
-        self._primitives: Dict[str, 'BasePrimitive'] = {}
-        
-        # Auto-register all primitives
+
+        self.runtime = runtime
+        self._primitives: Dict[str, "BasePrimitive"] = {}
         self._auto_register_primitives()
         self._initialized = True
-    
-    def _auto_register_primitives(self):
-        """
-        Auto-discover and instantiate all primitives from primitives.motion module.
-        # FIXED: Now it scans the entire primitives/ folder for any primitive modules, and imports all classes that are subclass of BasePrimitive. 
-        # This way we can add new primitives just by adding new files in primitives/ without modifying this registry code.
-        
-        """
-        from SkiLib.primitives import motion
+
+    def _auto_register_primitives(self) -> None:
         from SkiLib.base import BasePrimitive
-        import inspect
-        
-        
+
         primitives_dir = pathlib.Path(__file__).parent / "primitives"
         for py_file in sorted(primitives_dir.glob("*.py")):
-            # Skip non-python files and private modules (starting with _), such as __init__.py or _utils.py
             if py_file.name.startswith("_"):
                 continue
-            # Get the relative path to convert to module name. __file__.parent.parent is the SkiLib/ folder, 
-            # so relative path will be like "primitives/motion.py"
+
             relative = py_file.relative_to(pathlib.Path(__file__).parent.parent)
-            module_name = str(relative.with_suffix("")).replace("/", ".").replace("\\", ".") # Deal with Windows path style
-            # After conversion module_name will be like "Skilib.primitives.motion"
-            
+            module_name = str(relative.with_suffix("")).replace("/", ".").replace("\\", ".")
+
             try:
                 module = importlib.import_module(module_name)
-            except ImportError as e:
-                print(f"[PrimitiveRegistry] WARNING: Failed to import {module_name}: {e}")
+            except Exception as e:
+                logger.error("PrimitiveRegistry: failed to import '%s': %s", module_name, e, exc_info=True)
                 continue
-            
-            # import module
+
             for name, cls in inspect.getmembers(module, inspect.isclass):
-                # Get all primitives that are subclass of BasePrimitive, but not BasePrimitive itself
-                if (issubclass(cls, BasePrimitive) and cls is not BasePrimitive and cls.__module__ == module_name): # Last is to avoid external imports
-                    instance = cls(self.robot, self.RDK)
-                    self._primitives[name] = instance
-                    print(f"[PrimitiveRegistry] Registered: {name}")
-                    
+                if issubclass(cls, BasePrimitive) and cls is not BasePrimitive and cls.__module__ == module_name:
+                    try:
+                        self._primitives[name] = cls(self.runtime)
+                        logger.info("PrimitiveRegistry: registered '%s'.", name)
+                    except Exception as e:
+                        logger.error(
+                            "PrimitiveRegistry: failed to instantiate '%s': %s",
+                            name,
+                            e,
+                            exc_info=True,
+                        )
 
-
-    def get(self, name: str) -> 'BasePrimitive':
-        """Get primitive by name (e.g., 'MoveJ')"""
+    def get(self, name: str) -> "BasePrimitive":
         if name not in self._primitives:
             raise KeyError(f"Primitive '{name}' not found. Available: {list(self._primitives.keys())}")
         return self._primitives[name]
-    
-    def get_all(self) -> Dict[str, 'BasePrimitive']:
-        """Get all registered primitives as dict {name: instance}"""
+
+    def get_all(self) -> Dict[str, "BasePrimitive"]:
         return self._primitives.copy()
-    
-    def register(self, name: str, primitive: 'BasePrimitive'):
-        """Manually register a primitive (for custom/extension primitives)"""
+
+    def register(self, name: str, primitive: "BasePrimitive") -> None:
         self._primitives[name] = primitive
-        print(f"[PrimitiveRegistry] Manually registered: {name}")
-    
+        logger.info("PrimitiveRegistry: manually registered '%s'.", name)
+
+    def as_tools(self) -> list:
+        from langchain_core.tools import StructuredTool
+        from SkiLib.base import SkillResult
+        from SkiLib.tool_schema import build_pydantic_schema, resolve_tool_kwargs
+
+        tools: list[StructuredTool] = []
+
+        def _make_tool(primitive, parameters: dict):
+            def _invoke(**kwargs) -> dict:
+                resolved_kwargs, err = resolve_tool_kwargs(self.runtime, parameters, kwargs)
+                if err is not None:
+                    return err.to_llm_message()
+
+                result = primitive.try_execute(**resolved_kwargs)
+                return result.to_llm_message() if isinstance(result, SkillResult) else result
+
+            return _invoke
+
+        for class_name, primitive in self._primitives.items():
+            parameters = getattr(primitive, "TOOL_PARAMETERS", None)
+            if not parameters:
+                logger.debug(
+                    "PrimitiveRegistry: '%s' has no TOOL_PARAMETERS, skipping tool exposure.",
+                    class_name,
+                )
+                continue
+
+            tool_name = getattr(primitive, "TOOL_NAME", None) or class_name
+            description = (
+                getattr(primitive, "TOOL_DESCRIPTION", "")
+                or primitive.__doc__
+                or f"{tool_name} primitive"
+            )
+            args_schema = build_pydantic_schema(tool_name, parameters)
+
+            tools.append(StructuredTool(
+                name=tool_name,
+                description=description.strip(),
+                func=_make_tool(primitive, parameters),
+                args_schema=args_schema,
+            ))
+
+        return tools
