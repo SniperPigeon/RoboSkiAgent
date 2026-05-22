@@ -10,6 +10,7 @@ from SkiLib.log import get_logger
 from SkiLib.metatools.informative import list_targets
 from SkiLib.registry import SkillRegistry
 from Agent.state import GlobalState
+from Agent.llm import cached_system_message
 
 logger = get_logger(__name__)
 
@@ -101,8 +102,10 @@ def executor(state: GlobalState, *, llm: BaseChatModel) -> dict:
     executor_agent = create_agent(
         model=llm,
         tools=executor_tools,
-        system_prompt=_load_prompt("executor.txt").format(
-            error_info=result.to_llm_message()  # type: ignore
+        system_prompt=cached_system_message(
+            _load_prompt("executor.txt").format(
+                error_info=result.to_llm_message()  # type: ignore
+            )
         ),
     )
 

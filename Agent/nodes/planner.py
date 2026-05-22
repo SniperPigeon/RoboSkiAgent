@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from Agent.llm import get_node_timeouts
+from Agent.llm import cached_system_message, get_node_timeouts
 from Agent.state import GlobalState
 from SkiLib.log import get_logger
 from SkiLib.registry import SkillRegistry
@@ -100,7 +100,7 @@ def planner(state: GlobalState, *, llm: BaseChatModel) -> dict:
     registry = SkillRegistry.instance()
     tools, plan = _make_planner_tools(registry)
 
-    agent = create_agent(model=llm, tools=tools, system_prompt=_load_prompt("planner.txt"))
+    agent = create_agent(model=llm, tools=tools, system_prompt=cached_system_message(_load_prompt("planner.txt")))
 
     # Supervisor output is the last AIMessage; wrap as HumanMessage for Anthropic
     sup_content = state["messages"][-1].content

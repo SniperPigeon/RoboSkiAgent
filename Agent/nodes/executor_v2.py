@@ -34,7 +34,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field, create_model
 
-from Agent.llm import get_node_timeouts
+from Agent.llm import cached_human_message, cached_system_message, get_node_timeouts
 from Agent.nodes.executor import _EscalateHITLException, escalate_tool  # noqa: F401
 from Agent.state import GlobalState
 from SkiLib.base import ERROR_ROBOT_INACTIVE, ExecutionPhase, SkillResult
@@ -699,7 +699,7 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     plan_llm  = llm.bind_tools(plan_tools)
     provider  = os.getenv("ROBOSKI_LLM_PROVIDER", "claude").lower()
     messages  = [
-        HumanMessage(content=system_prompt),
+        cached_human_message(system_prompt),
         HumanMessage(content=(
             f"Build the execution plan for the {skill_name} skill now. "
             "Register every step and check in order using the provided tools. "
@@ -865,7 +865,11 @@ def executor_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
         steps, failed_step, failure_info,  # type: ignore[arg-type]
     )
     sub_agent_tools = [escalate_tool, *primitive_tools, *sensor_tools]
-    sub_agent       = create_agent(model=llm, tools=sub_agent_tools, system_prompt=recovery_prompt)
+    sub_agent       = create_agent(
+        model=llm,
+        tools=sub_agent_tools,
+        system_prompt=cached_system_message(recovery_prompt),
+    )
     recovery_input  = {
         "messages": [HumanMessage(
             content=(

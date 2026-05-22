@@ -122,6 +122,8 @@ class GenesisController:
                         self.runtime.robot.control_dofs_position(
                             hold_gripper_qpos, dofs_idx_local=gripper_dofs
                         )
+                    if self.runtime.held_item_name is not None:
+                        continue
                     self.runtime.stabilize_assembled_objects()
                     self.runtime.scene.step()
                     self.runtime.stabilize_assembled_objects()

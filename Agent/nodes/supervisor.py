@@ -7,7 +7,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
-from Agent.llm import get_node_timeouts
+from Agent.llm import cached_system_message, get_node_timeouts
 from Agent.state import GlobalState
 from SkiLib.log import get_logger
 from SkiLib.metatools.informative import get_tools as get_info_tools
@@ -116,7 +116,7 @@ def _get_supervisor_agent(llm: BaseChatModel):
             model=llm,
             tools=get_info_tools(),
             response_format=SupervisorOutput,
-            system_prompt=_build_supervisor_prompt(),
+            system_prompt=cached_system_message(_build_supervisor_prompt()),
         )
         logger.info("[supervisor] Agent built. Skills: %s", list(_get_available_skills().keys()))
     return _agent_cache[key]

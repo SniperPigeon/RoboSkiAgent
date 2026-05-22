@@ -3,6 +3,7 @@ import os
 import pathlib
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -12,9 +13,9 @@ _log = logging.getLogger(__name__)
 # Timeout (seconds) per LLM phase, keyed by provider.
 # Local providers (ollama, llamacpp) are significantly slower than remote API calls.
 _TIMEOUTS: dict[str, dict[str, float]] = {
-    "claude":   {"supervisor": 60,  "planner": 40,  "executor_plan": 40, "executor_recovery": 60},
-    "ollama":   {"supervisor": 180, "planner": 100, "executor_plan": 60, "executor_recovery": 80},
-    "llamacpp": {"supervisor": 240, "planner": 100, "executor_plan": 90, "executor_recovery": 80},
+    "claude":   {"supervisor": 60,  "planner": 40,  "executor_plan": 40, "executor_recovery": 180},
+    "ollama":   {"supervisor": 180, "planner": 100, "executor_plan": 60, "executor_recovery": 120},
+    "llamacpp": {"supervisor": 240, "planner": 100, "executor_plan": 90, "executor_recovery": 120},
 }
 
 
@@ -22,6 +23,42 @@ def get_node_timeouts() -> dict[str, float]:
     """Return timeout seconds per node/phase for the active LLM provider."""
     provider = os.getenv("ROBOSKI_LLM_PROVIDER", "claude")
     return _TIMEOUTS.get(provider, _TIMEOUTS["claude"])
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def anthropic_prompt_caching_enabled() -> bool:
+    """Return True when Anthropic prompt caching should be marked on prompts."""
+    provider = os.getenv("ROBOSKI_LLM_PROVIDER", "claude").lower()
+    return provider == "claude" and _env_bool("ANTHROPIC_PROMPT_CACHING", True)
+
+
+def anthropic_cached_text_block(text: str) -> list[dict] | str:
+    """Wrap text as an Anthropic cacheable text block when caching is enabled."""
+    if not anthropic_prompt_caching_enabled() or not text.strip():
+        return text
+    return [
+        {
+            "type": "text",
+            "text": text,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def cached_system_message(text: str) -> SystemMessage:
+    """Create a SystemMessage with Anthropic cache control when appropriate."""
+    return SystemMessage(content=anthropic_cached_text_block(text))
+
+
+def cached_human_message(text: str) -> HumanMessage:
+    """Create a HumanMessage with Anthropic cache control when appropriate."""
+    return HumanMessage(content=anthropic_cached_text_block(text))
 
 
 def _ensure_gguf(repo: str, filename: str, local_dir: str) -> pathlib.Path:
@@ -62,9 +99,13 @@ def create_llm(provider: str = None, **kwargs) -> BaseChatModel: #typ: ignore
     if provider == "claude":
         from langchain_anthropic import ChatAnthropic
         model    = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+        betas_raw = os.getenv("ANTHROPIC_BETAS", "")
+        betas = [b.strip() for b in betas_raw.split(",") if b.strip()] or None
         # Set HTTP timeout = longest node timeout so the connection closes before
         # the ThreadPoolExecutor wrapper fires, preventing zombie background threads.
         timeout  = max(get_node_timeouts().values())
+        if betas is not None and "betas" not in kwargs:
+            kwargs["betas"] = betas
         return ChatAnthropic(model_name=model, timeout=timeout, **kwargs)
 
     elif provider == "ollama":

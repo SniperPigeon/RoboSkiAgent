@@ -120,7 +120,8 @@ Call `escalate_to_hitl` immediately for any of the following:
 ### Retry Allowed
 
 **Grasp returns GRIPPER_FAILURE** (step 4):
-Re-execute step 3 (`MoveL` to `pick_target`) to correct TCP alignment, then
+First lift away from the workpiece by executing `MoveL(target=pick_approach)`.
+Then re-execute step 3 (`MoveL` to `pick_target`) to correct TCP alignment, and
 retry `Grasp`.  Maximum 2 retries.  Escalate if still failing.
 
 **Release returns GRIPPER_FAILURE** (step 8):

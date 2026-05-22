@@ -24,11 +24,11 @@ import os
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from Agent.llm import get_node_timeouts
+from Agent.llm import cached_system_message, get_node_timeouts
 from Agent.state import GlobalState
 from SkiLib.log import get_logger
 from SkiLib.scenes.fmb import ASSEMBLY_REFERENCE_PATH
@@ -209,7 +209,7 @@ def planner_v2(state: GlobalState, *, llm: BaseChatModel) -> dict:
     llm_with_tools = llm.bind_tools(tools)
 
     sup_content = state["messages"][-1].content
-    messages    = [SystemMessage(content=system_prompt), HumanMessage(content=sup_content)]
+    messages    = [cached_system_message(system_prompt), HumanMessage(content=sup_content)]
     timeout     = get_node_timeouts()["planner"]
     provider    = os.getenv("ROBOSKI_LLM_PROVIDER", "claude").lower()
 

@@ -22,6 +22,9 @@ from SkiLib.genesis.motion import (
     validate_joint_target,
 )
 from SkiLib.genesis.types import SceneTarget
+from SkiLib.log import get_logger
+
+logger = get_logger(__name__)
 
 
 def _target_orientation_data(target: SceneTarget) -> dict:
@@ -44,6 +47,11 @@ def _snapshot(runtime) -> RobotState:
 
 
 def _ik_failure_result(target_name: str, ik: IKResult) -> SkillResult:
+    logger.warning(
+        "IK failure: target=%s error=%s",
+        target_name,
+        ik.error.tolist() if hasattr(ik.error, "tolist") else ik.error,
+    )
     return SkillResult(
         success=False,
         execution_phase=ExecutionPhase.PLANNING,
@@ -72,10 +80,17 @@ class MoveJ(BasePrimitive):
         super().__init__(runtime)
 
     def check(self, target: Union[SceneTarget, List[float]], ref_frame=None) -> SkillResult:
+        logger.info("MoveJ.check start: target=%s", getattr(target, "name", "joint_target"))
         if isinstance(target, SceneTarget):
             ik = solve_ik(self.runtime, target)
             if not ik.success:
                 return _ik_failure_result(target.name, ik)
+            logger.info(
+                "MoveJ.check passed: target=%s pos=%s yaw=%s",
+                target.name,
+                [round(float(v), 4) for v in target.pose.pos],
+                target.pose.tcp_yaw_deg,
+            )
             return SkillResult(
                 success=True,
                 execution_phase=ExecutionPhase.PLANNING,
@@ -90,17 +105,20 @@ class MoveJ(BasePrimitive):
             try:
                 validate_joint_target(self.runtime, target)
             except ValueError as e:
+                logger.warning("MoveJ.check failed: invalid joint target %s", e)
                 return SkillResult(
                     success=False,
                     execution_phase=ExecutionPhase.VALIDATION,
                     error_type=ERROR_INVALID_PARAM,
                     message=str(e),
                 )
+            logger.info("MoveJ.check passed: joint target length=%d", len(target))
             return SkillResult(
                 success=True,
                 execution_phase=ExecutionPhase.PLANNING,
                 message="MoveJ joint target is valid.",
             )
+        logger.warning("MoveJ.check failed: invalid target=%r", target)
         return SkillResult(
             success=False,
             execution_phase=ExecutionPhase.VALIDATION,
@@ -115,15 +133,25 @@ class MoveJ(BasePrimitive):
     def _execute_body(self, target: Union[SceneTarget, List[float]], blocking: bool = True, ref_frame=None) -> SkillResult:
         try:
             if isinstance(target, SceneTarget):
+                start_tcp = get_tcp_pos(self.runtime)
+                logger.info(
+                    "MoveJ.execute start: target=%s start_tcp=%s target_pos=%s yaw=%s",
+                    target.name,
+                    np.round(start_tcp, 4).tolist(),
+                    [round(float(v), 4) for v in target.pose.pos],
+                    target.pose.tcp_yaw_deg,
+                )
                 ik = solve_ik(self.runtime, target)
                 if not ik.success or ik.qpos is None:
                     return _ik_failure_result(target.name, ik)
                 qpos = ik.qpos
                 target_name = target.name
             elif isinstance(target, list):
+                logger.info("MoveJ.execute start: joint_target length=%d", len(target))
                 qpos = validate_joint_target(self.runtime, target)
                 target_name = "joint_target"
             else:
+                logger.warning("MoveJ.execute failed: invalid target=%r", target)
                 return SkillResult(
                     success=False,
                     execution_phase=ExecutionPhase.VALIDATION,
@@ -133,6 +161,11 @@ class MoveJ(BasePrimitive):
 
             reached, final_error = control_to_qpos(self.runtime, qpos)
             if not reached:
+                logger.warning(
+                    "MoveJ.execute timeout: target=%s final_joint_error=%.6f",
+                    target_name,
+                    final_error,
+                )
                 return SkillResult(
                     success=False,
                     execution_phase=ExecutionPhase.EXECUTION,
@@ -144,6 +177,12 @@ class MoveJ(BasePrimitive):
                 )
 
             state = _snapshot(self.runtime)
+            logger.info(
+                "MoveJ.execute success: target=%s final_joint_error=%.6f final_tcp=%s",
+                target_name,
+                final_error,
+                np.round(np.array(state.pose, dtype=float), 4).tolist() if state.pose is not None else None,
+            )
             return SkillResult(
                 success=True,
                 execution_phase=ExecutionPhase.EXECUTION,
@@ -156,6 +195,7 @@ class MoveJ(BasePrimitive):
                 },
             )
         except Exception as e:
+            logger.warning("MoveJ.execute exception: %s", e, exc_info=True)
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
@@ -193,6 +233,14 @@ class MoveL(BasePrimitive):
     def _waypoint_qpos(self, target: SceneTarget, steps: int = 20) -> tuple[list, IKResult | None]:
         start = get_tcp_pos(self.runtime)
         end = target.pose.pos
+        logger.info(
+            "MoveL.waypoints start: target=%s start_tcp=%s end_tcp=%s steps=%d yaw=%s",
+            target.name,
+            np.round(start, 4).tolist(),
+            [round(float(v), 4) for v in end],
+            steps,
+            target.pose.tcp_yaw_deg,
+        )
         qpos_seed = current_qpos(self.runtime)
         qposes = []
 
@@ -208,13 +256,22 @@ class MoveL(BasePrimitive):
             )
             ik = solve_ik(self.runtime, waypoint, init_qpos=qpos_seed)
             if not ik.success or ik.qpos is None:
+                logger.warning(
+                    "MoveL.waypoints IK failed: target=%s waypoint_index=%d waypoint_pos=%s",
+                    target.name,
+                    len(qposes) + 1,
+                    [round(float(v), 4) for v in pos],
+                )
                 return qposes, ik
             qposes.append(ik.qpos)
             qpos_seed = ik.qpos
+        logger.info("MoveL.waypoints ready: target=%s count=%d", target.name, len(qposes))
         return qposes, None
 
     def check(self, target: SceneTarget, ref_frame=None) -> SkillResult:
+        logger.info("MoveL.check start: target=%s", getattr(target, "name", target))
         if not isinstance(target, SceneTarget):
+            logger.warning("MoveL.check failed: invalid target=%r", target)
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
@@ -224,6 +281,12 @@ class MoveL(BasePrimitive):
         qposes, failed = self._waypoint_qpos(target)
         if failed is not None:
             return _ik_failure_result(target.name, failed)
+        logger.info(
+            "MoveL.check passed: target=%s pos=%s waypoints=%d",
+            target.name,
+            [round(float(v), 4) for v in target.pose.pos],
+            len(qposes),
+        )
         return SkillResult(
             success=True,
             execution_phase=ExecutionPhase.PLANNING,
@@ -236,7 +299,9 @@ class MoveL(BasePrimitive):
         return self._submit_to_controller(self._execute_body, target, ref_frame, blocking)
 
     def _execute_body(self, target: SceneTarget, ref_frame=None, blocking: bool = True) -> SkillResult:
+        logger.info("MoveL.execute start: target=%s", getattr(target, "name", target))
         if not isinstance(target, SceneTarget):
+            logger.warning("MoveL.execute failed: invalid target=%r", target)
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.VALIDATION,
@@ -260,6 +325,13 @@ class MoveL(BasePrimitive):
                 )
                 max_error = max(max_error, final_error)
                 if not reached:
+                    logger.warning(
+                        "MoveL.execute timeout: target=%s waypoint=%d/%d final_joint_error=%.6f",
+                        target.name,
+                        idx + 1,
+                        len(qposes),
+                        final_error,
+                    )
                     return SkillResult(
                         success=False,
                         execution_phase=ExecutionPhase.EXECUTION,
@@ -271,6 +343,13 @@ class MoveL(BasePrimitive):
                     )
 
             state = _snapshot(self.runtime)
+            logger.info(
+                "MoveL.execute success: target=%s waypoints=%d max_joint_error=%.6f final_tcp=%s",
+                target.name,
+                len(qposes),
+                max_error,
+                np.round(np.array(state.pose, dtype=float), 4).tolist() if state.pose is not None else None,
+            )
             return SkillResult(
                 success=True,
                 execution_phase=ExecutionPhase.EXECUTION,
@@ -284,6 +363,7 @@ class MoveL(BasePrimitive):
                 },
             )
         except Exception as e:
+            logger.warning("MoveL.execute exception: target=%s error=%s", target.name, e, exc_info=True)
             return SkillResult(
                 success=False,
                 execution_phase=ExecutionPhase.EXECUTION,
