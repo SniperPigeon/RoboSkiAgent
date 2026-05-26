@@ -36,7 +36,7 @@ Fallback tools, only if register_execution_plan is unavailable:
 1. Follow the execution sequence in the skill guide in exact order.
 2. Replace ALL {parameter_name} placeholders with the concrete values supplied.
 3. After every Grasp step, immediately call the appropriate sensor check tool
-   to verify the item is held (check_expected=true, on_fail="llm_recovery").
+   to verify the item is held (check_expected=true, on_fail="llm_recovery"). 
 4. After a Release step, add a sensor check only if the skill guide explicitly
    calls for post-release verification.
 5. Do NOT add check steps after MoveJ or MoveL steps.
